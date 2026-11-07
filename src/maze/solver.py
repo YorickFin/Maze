@@ -5,8 +5,9 @@
 受阻反馈，从而逐步推断障碍位置。
 
 策略：在「已知可通行 + 未知」图上朝右边界做 A*（启发偏向右），
-未知格允许通行但代价略高，鼓励走已确认安全的格；撞墙受阻则标记
-为已知障碍并重新规划。如此反复直到到达右边界或确认无法更右。
+未知格允许通行但代价略高，鼓励走已确认安全的格；撞墙或撞灰色障碍
+受阻则标记为已知阻挡物并重新规划。如此反复直到到达右边界或确认
+无法更右。
 """
 
 from __future__ import annotations
@@ -65,8 +66,8 @@ class Solver:
     # ---- 感知与移动 ----
 
     def _try_move(self, nx: int, ny: int) -> bool:
-        """尝试移动到 (nx,ny)。受阻返回 False 并记录障碍，成功返回 True。"""
-        if self.maze.is_wall(nx, ny):
+        """尝试移动到 (nx,ny)。受阻（墙或灰色障碍）返回 False 并记录。"""
+        if self.maze.is_blocked(nx, ny):
             self.known[(nx, ny)] = KNOWN_WALL
             self.blocked_hits += 1
             return False

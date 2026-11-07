@@ -21,20 +21,26 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
         data = tomllib.load(f)
 
     maze_cfg = data.get("maze", {})
+    gen = data.get("generator", {})
     obs = data.get("obstacle", {})
-    corridor = data.get("corridor", {})
     solver_cfg = data.get("solver", {})
     vis = data.get("visual", {})
 
     return Config(
         width=int(maze_cfg.get("width", 1000)),
         height=int(maze_cfg.get("height", 1000)),
-        obstacle_count=int(obs.get("count", 3000)),
-        obstacle_ratio=float(obs.get("ratio", 0.15)),
-        seed=int(obs.get("seed", -1)),
-        corridor_min=int(corridor.get("min", 1)),
-        corridor_max=int(corridor.get("max", 5)),
-        corridor_extra_prob=float(corridor.get("extra_prob", 0.4)),
+        seed=int(gen.get("seed", -1)),
+        node_spacing=int(gen.get("node_spacing", 100)),
+        node_jitter=int(gen.get("node_jitter", 25)),
+        corridor_radius_min=int(gen.get("corridor_radius_min", 13)),
+        corridor_radius_max=int(gen.get("corridor_radius_max", 20)),
+        chamber_radius_min=int(gen.get("chamber_radius_min", 22)),
+        chamber_radius_max=int(gen.get("chamber_radius_max", 40)),
+        chamber_prob=float(gen.get("chamber_prob", 0.55)),
+        loop_prob=float(gen.get("loop_prob", 0.12)),
+        obstacle_blobs=int(obs.get("blobs", 12)),
+        obstacle_radius_min=int(obs.get("radius_min", 12)),
+        obstacle_radius_max=int(obs.get("radius_max", 26)),
         view_size=int(solver_cfg.get("view_size", 10)),
         step_interval=float(solver_cfg.get("step_interval", 0.002)),
         max_steps=int(solver_cfg.get("max_steps", 500_000)),
@@ -47,12 +53,13 @@ def main() -> None:
     maze = generate_maze(cfg)
     solver = Solver(maze, view_size=cfg.view_size, max_steps=cfg.max_steps)
 
-    # 简单预检查：起点是否被障碍覆盖
-    if maze.is_wall(*maze.start):
-        print(f"警告：起点 {maze.start} 被障碍覆盖，跳过。")
+    # 简单预检查：起点是否被墙或障碍覆盖
+    if maze.is_blocked(*maze.start):
+        print(f"警告：起点 {maze.start} 不可通行，跳过。")
         sys.exit(1)
 
-    print(f"迷宫 {maze.width}x{maze.height}，障碍格 {maze.count_walls()}，"
+    print(f"迷宫 {maze.width}x{maze.height}，墙格 {maze.count_walls()}，"
+          f"障碍格 {maze.count_obstacles()}，通道格 {maze.count_empty()}，"
           f"起点 {maze.start}，终点 {maze.end}，视距 {cfg.view_size}x{cfg.view_size}")
 
     api = Api(maze, solver, cfg)

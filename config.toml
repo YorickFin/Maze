@@ -2,27 +2,32 @@
 # 修改后重启程序生效
 
 [maze]
-# 网格宽高（格）
+# 网格宽高（格），1 格 = 完整地图上的 1 像素
 width = 1000
 height = 1000
 
-# 障碍块尺寸范围（格）：最小 1x1，最大 (w/25)x(h/25)
-# 由程序根据 width/height 自动计算，无需手动修改
-# 可行动区域（非障碍）最小 1x1
-
-[obstacle]
-# 兼容字段（房间式生成不再使用覆盖率控制，保留以兼容配置结构）
-count = 3000
-ratio = 0.15
+[generator]
 # 随机种子；-1 表示每次运行都不同
 seed = -1
+# 节点阵列间距与位置抖动（格）
+node_spacing = 100
+node_jitter = 25
+# 通道半径范围（格）：越大通道越宽
+corridor_radius_min = 13
+corridor_radius_max = 20
+# 节点腔室半径范围（格）：通道交汇处的膨大部分
+chamber_radius_min = 22
+chamber_radius_max = 40
+# 节点膨大腔室出现概率（0~1）：越小通道越顺滑
+chamber_prob = 0.55
+# 非生成树边额外连边概率（0~1）：越大环路越多
+loop_prob = 0.12
 
-[corridor]
-# 房间之间通道宽度范围（格）：1~5
-min = 1
-max = 5
-# 非生成树边额外开洞概率（0~1）：越大房间间门越多、迷宫越连通
-extra_prob = 0.4
+[obstacle]
+# 灰色障碍斑块数量与半径范围（格）
+blobs = 12
+radius_min = 12
+radius_max = 26
 
 [solver]
 # 破解方视野边长（格）：10x10

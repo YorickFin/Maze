@@ -1,17 +1,22 @@
-"""迷宫生成模块（房间式）。
+"""「有机形态」迷宫生成模块。
 
-把 w×h 网格按固定间隔划分成矩形房间网格（房间边长 ≤ (w/25)×(h/25)），
-相邻房间之间隔 1 格厚墙。用随机生成树（Kruskal + 并查集）保证所有房间
-连通（从而起点到终点必有至少一条路径）：生成树边强制开洞，非生成树边
-按 corridor_extra_prob 概率额外开洞，形成「部分墙封闭」的房间式迷宫。
+骨架是一组带抖动的节点阵列，相邻节点用 Kruskal 随机生成树连成
+一条全连通骨架，再按 loop_prob 额外连边形成环路。沿每条骨架边用
+「可变半径圆盘笔刷」填充通道，节点处填充更大的圆形腔室，因此最终
+通道宽窄不一、转角圆润、节点处膨大，接近手绘迷宫。
 
-房间之间通道（门）宽度在 corridor_min~corridor_max 之间随机。
-起点固定在左边界、终点固定在右边界（均垂直居中）。
+生成后在通道内投放灰色障碍斑块（OBSTACLE，阻挡移动）。为不切断
+起点→终点通路，障碍只落在「起点→终点最短路径」的保护带之外。
+
+格状态：EMPTY=0 可通行，WALL=1 墙，OBSTACLE=2 障碍。
+起点在左边界垂直居中，终点在右边界垂直居中。
 """
 
 from __future__ import annotations
 
+import math
 import random
+from collections import deque
 from dataclasses import dataclass
 
 
@@ -21,37 +26,34 @@ class Config:
 
     width: int = 1000
     height: int = 1000
-    obstacle_count: int = 3000
-    obstacle_ratio: float = 0.15  # 兼容旧字段，房间式不用
     seed: int = -1
+    node_spacing: int = 100     # 节点阵列基础间距（格）
+    node_jitter: int = 25       # 节点位置抖动（格）
+    corridor_radius_min: int = 13  # 通道最小半径（格）
+    corridor_radius_max: int = 20  # 通道最大半径（格）
+    chamber_radius_min: int = 22   # 节点腔室最小半径（格）
+    chamber_radius_max: int = 40   # 节点腔室最大半径（格）
+    chamber_prob: float = 0.55     # 节点膨大腔室出现概率（0~1）
+    loop_prob: float = 0.12        # 非生成树边额外连边概率（0~1）
+    obstacle_blobs: int = 12       # 灰色障碍斑块数量
+    obstacle_radius_min: int = 12  # 障碍斑块最小半径（格）
+    obstacle_radius_max: int = 26  # 障碍斑块最大半径（格）
     view_size: int = 10
     step_interval: float = 0.002
     max_steps: int = 500_000
     cell_px: int = 2
-    corridor_min: int = 1   # 通道最小宽度
-    corridor_max: int = 5   # 通道最大宽度
-    corridor_extra_prob: float = 0.4  # 非生成树边额外开洞概率（0~1）
-
-    @property
-    def max_block_w(self) -> int:
-        """房间最大宽度（格）= w/25，向下取整，至少 1。"""
-        return max(1, self.width // 25)
-
-    @property
-    def max_block_h(self) -> int:
-        """房间最大高度（格）= h/25，向下取整，至少 1。"""
-        return max(1, self.height // 25)
 
 
 # 格状态常量
 EMPTY = 0
 WALL = 1
+OBSTACLE = 2
 
 
 class Maze:
     """迷宫网格。
 
-    grid[y][x] 取值：EMPTY=可通行，WALL=障碍。
+    grid[y][x] 取值：EMPTY=可通行，WALL=墙，OBSTACLE=障碍。
     """
 
     def __init__(self, width: int, height: int, grid: list[list[int]],
@@ -63,10 +65,16 @@ class Maze:
         self.end = end
 
     def is_wall(self, x: int, y: int) -> bool:
-        """越界视为墙，其余按网格判断。"""
+        """是否墙体（越界视为墙）。"""
         if x < 0 or x >= self.width or y < 0 or y >= self.height:
             return True
         return self.grid[y][x] == WALL
+
+    def is_blocked(self, x: int, y: int) -> bool:
+        """是否不可通行（墙或灰色障碍，越界视为不可通行）。"""
+        if x < 0 or x >= self.width or y < 0 or y >= self.height:
+            return True
+        return self.grid[y][x] != EMPTY
 
     def in_bounds(self, x: int, y: int) -> bool:
         return 0 <= x < self.width and 0 <= y < self.height
@@ -74,9 +82,15 @@ class Maze:
     def count_walls(self) -> int:
         return sum(1 for row in self.grid for c in row if c == WALL)
 
+    def count_obstacles(self) -> int:
+        return sum(1 for row in self.grid for c in row if c == OBSTACLE)
+
+    def count_empty(self) -> int:
+        return sum(1 for row in self.grid for c in row if c == EMPTY)
+
 
 class _DSU:
-    """并查集（房间连通性校验用）。"""
+    """并查集（节点连通性校验用）。"""
 
     def __init__(self):
         self.parent: dict[int, int] = {}
@@ -98,114 +112,300 @@ class _DSU:
         return True
 
 
-def _room_layout(cfg: Config):
-    """计算房间网格布局（房间铺满整个网格，最后房间可变宽高）。
+def _fill_disk(grid, w: int, h: int, cx: float, cy: float,
+               radius: float, value: int) -> None:
+    """以 (cx,cy) 为圆心、radius 为半径填充圆盘（逐行整段赋值，速度快）。"""
+    if radius <= 0:
+        return
+    r2 = radius * radius
+    y0 = max(0, int(math.floor(cy - radius)))
+    y1 = min(h - 1, int(math.ceil(cy + radius)))
+    for y in range(y0, y1 + 1):
+        dy = y - cy
+        if dy * dy > r2:
+            continue
+        half = math.sqrt(r2 - dy * dy)
+        xa = max(0, int(math.ceil(cx - half)))
+        xb = min(w - 1, int(math.floor(cx + half)))
+        if xa <= xb:
+            grid[y][xa:xb + 1] = [value] * (xb - xa + 1)
 
-    返回 (cols, rows, room_w, room_h, step_w, step_h)。
-    房间 (r,c) 的 x 范围 [c*step_w, min((c+1)*step_w-1, w-1)]，
-    y 范围 [r*step_h, min((r+1)*step_h-1, h-1)]；房间间墙在
-    x=(c+1)*step_w 与 y=(r+1)*step_h 处（若 < 网格尺寸）。
+
+def _carve_path(grid, w: int, h: int, p0, p1, r_start: float, r_end: float,
+                rng: random.Random, wobble: float) -> None:
+    """沿两点间的二次贝塞尔曲线填充可变半径通道。
+
+    wobble 控制弯曲幅度（相对长度）；半径沿路径线性过渡并叠加正弦抖动，
+    使通道边缘宽窄不一。
     """
-    room_w = cfg.max_block_w
-    room_h = cfg.max_block_h
-    step_w = room_w + 1
-    step_h = room_h + 1
-    cols = max(1, -(-cfg.width // step_w))   # ceil
-    rows = max(1, -(-cfg.height // step_h))  # ceil
-    return cols, rows, room_w, room_h, step_w, step_h
+    x0, y0 = p0
+    x1, y1 = p1
+    dx, dy = x1 - x0, y1 - y0
+    length = math.hypot(dx, dy)
+    if length < 1.0:
+        _fill_disk(grid, w, h, x0, y0, max(r_start, r_end), EMPTY)
+        return
+
+    # 垂直方向偏移，形成弯曲通道
+    perp_x, perp_y = -dy / length, dx / length
+    bend = rng.uniform(-wobble, wobble) * length
+    cx = (x0 + x1) / 2 + perp_x * bend
+    cy = (y0 + y1) / 2 + perp_y * bend
+
+    steps = max(2, int(length / 1.5))
+    phase = rng.uniform(0, math.tau)
+    amp = rng.uniform(0.6, 1.8)
+    for i in range(steps + 1):
+        t = i / steps
+        u = 1.0 - t
+        x = u * u * x0 + 2 * u * t * cx + t * t * x1
+        y = u * u * y0 + 2 * u * t * cy + t * t * y1
+        radius = r_start * u + r_end * t + amp * math.sin(phase + t * math.tau * 1.1)
+        _fill_disk(grid, w, h, x, y, max(3.0, radius), EMPTY)
 
 
-def _build_rooms_grid(cfg: Config, cols, rows, room_w, room_h, step_w, step_h):
-    """构建房间网格：房间内 EMPTY，房间间墙 WALL。
+def _make_nodes(cfg: Config, rng: random.Random):
+    """生成带抖动的节点阵列，返回 (nodes, cols, rows)。
 
-    房间 (r,c) 的右墙在 x=(c+1)*step_w（若 < 宽），下墙在 y=(r+1)*step_h。
-    网格四周不额外设墙（边界视为墙）。最后房间铺满至网格边缘。
+    node = (x, y, 腔室半径)。
     """
-    grid = [[EMPTY] * cfg.width for _ in range(cfg.height)]
-    # 房间间竖墙：x = (c+1)*step_w - 1（房间 c 右侧墙），c=0..cols-2
-    for c in range(cols - 1):
-        wx = (c + 1) * step_w - 1
-        if wx < cfg.width:
-            for y in range(cfg.height):
-                grid[y][wx] = WALL
-    # 房间间横墙：y = (r+1)*step_h - 1（房间 r 下侧墙），r=0..rows-2
-    for r in range(rows - 1):
-        wy = (r + 1) * step_h - 1
-        if wy < cfg.height:
-            for x in range(cfg.width):
-                grid[wy][x] = WALL
-    return grid
+    margin = cfg.chamber_radius_max + 6
+    usable_w = max(1, cfg.width - 2 * margin)
+    usable_h = max(1, cfg.height - 2 * margin)
+    cols = max(2, round(usable_w / cfg.node_spacing) + 1)
+    rows = max(2, round(usable_h / cfg.node_spacing) + 1)
+    step_x = usable_w / (cols - 1)
+    step_y = usable_h / (rows - 1)
+    jitter_x = min(cfg.node_jitter, step_x / 3)
+    jitter_y = min(cfg.node_jitter, step_y / 3)
+    max_x = cfg.width - margin - 1
+    max_y = cfg.height - margin - 1
+
+    nodes: list[tuple[float, float, float]] = []
+    for j in range(rows):
+        for i in range(cols):
+            x = margin + i * step_x + rng.uniform(-jitter_x, jitter_x)
+            y = margin + j * step_y + rng.uniform(-jitter_y, jitter_y)
+            x = min(max(x, margin), max_x)
+            y = min(max(y, margin), max_y)
+            # 部分节点膨大成腔室，其余只保留通道宽度，避免出现"串珠"感
+            if rng.random() < cfg.chamber_prob:
+                r = rng.uniform(cfg.chamber_radius_min, cfg.chamber_radius_max)
+            else:
+                r = rng.uniform(cfg.corridor_radius_min, cfg.corridor_radius_max)
+            nodes.append((x, y, r))
+    return nodes, cols, rows
 
 
-def _room_rect(c, r, cfg, cols, rows, room_w, room_h, step_w, step_h):
-    """房间 (r,c) 的网格范围 (x0,y0,x1,y1)（含）。"""
-    x0 = c * step_w
-    y0 = r * step_h
-    x1 = min((c + 1) * step_w - 1, cfg.width - 1) if c == cols - 1 else c * step_w + room_w - 1
-    y1 = min((r + 1) * step_h - 1, cfg.height - 1) if r == rows - 1 else r * step_h + room_h - 1
-    return x0, y0, x1, y1
+def _carve_skeleton(cfg: Config, rng: random.Random, grid,
+                    nodes, cols: int, rows: int) -> None:
+    """节点腔室 + Kruskal 生成树连边 + 额外环路。"""
+    # 节点腔室：先填充，作为通道交汇处的膨大部分
+    for (x, y, r) in nodes:
+        _fill_disk(grid, cfg.width, cfg.height, x, y, r, EMPTY)
 
-
-def _open_corridors(rng: random.Random, cfg: Config, grid,
-                    cols, rows, room_w, room_h, step_w, step_h):
-    """Kruskal 随机生成树开洞，保证房间连通。
-
-    每条墙边：生成树边强制开洞；非树边按 corridor_extra_prob 概率开洞。
-    洞（门）宽 corridor_min~corridor_max，位置沿墙随机。
-    """
-    # 收集所有相邻房间边（右邻居、下邻居）
-    edges = []
-    for r in range(rows):
-        for c in range(cols):
-            if c + 1 < cols:
-                edges.append((r, c, r, c + 1))
-            if r + 1 < rows:
-                edges.append((r, c, r + 1, c))
+    # 候选边：右、下、右下（抖动后呈不规则走向）
+    edges: list[tuple[int, int]] = []
+    for j in range(rows):
+        for i in range(cols):
+            idx = j * cols + i
+            if i + 1 < cols:
+                edges.append((idx, idx + 1))
+            if j + 1 < rows:
+                edges.append((idx, idx + cols))
+            if i + 1 < cols and j + 1 < rows:
+                edges.append((idx, idx + cols + 1))
     rng.shuffle(edges)
 
     dsu = _DSU()
-    hole_len_choices = list(range(cfg.corridor_min, max(cfg.corridor_min, cfg.corridor_max) + 1))
+    for a, b in edges:
+        is_tree = dsu.union(a, b)  # True=首次连通，即生成树边
+        if not is_tree and rng.random() >= cfg.loop_prob:
+            continue
+        xa, ya, _ = nodes[a]
+        xb, yb, _ = nodes[b]
+        ra = rng.uniform(cfg.corridor_radius_min, cfg.corridor_radius_max)
+        rb = rng.uniform(cfg.corridor_radius_min, cfg.corridor_radius_max)
+        _carve_path(grid, cfg.width, cfg.height, (xa, ya), (xb, yb),
+                    ra, rb, rng, wobble=0.18)
 
-    for (r1, c1, r2, c2) in edges:
-        a = r1 * cols + c1
-        b = r2 * cols + c2
-        must_open = dsu.union(a, b)  # True=之前未连通（生成树边）
-        if not must_open and rng.random() > cfg.corridor_extra_prob:
-            continue  # 非树边且不额外开 → 保留墙
-        hole_len = rng.choice(hole_len_choices)
 
-        if c1 != c2:
-            # 左右相邻 → 竖墙在 x = max(c1,c2)*step_w - 1，洞沿 y
-            wx = max(c1, c2) * step_w - 1
-            # 两房间同一行 r1，y 范围取两房间的交（同 r，相同 y 范围）
-            _x0, y0, _x1, y1 = _room_rect(c1, r1, cfg, cols, rows, room_w, room_h, step_w, step_h)
-            hole_len = min(hole_len, y1 - y0 + 1)
-            hy = rng.randint(y0, y1 - hole_len + 1)
-            for dy in range(hole_len):
-                if 0 <= hy + dy < cfg.height and 0 <= wx < cfg.width:
-                    grid[hy + dy][wx] = EMPTY
-        else:
-            # 上下相邻 → 横墙在 y = max(r1,r2)*step_h - 1，洞沿 x
-            wy = max(r1, r2) * step_h - 1
-            x0, _y0, x1, _y1 = _room_rect(c1, r1, cfg, cols, rows, room_w, room_h, step_w, step_h)
-            hole_len = min(hole_len, x1 - x0 + 1)
-            hx = rng.randint(x0, x1 - hole_len + 1)
-            for dx in range(hole_len):
-                if 0 <= hx + dx < cfg.width and 0 <= wy < cfg.height:
-                    grid[wy][hx + dx] = EMPTY
+def _connect_edges(cfg: Config, rng: random.Random, grid, nodes,
+                   start: tuple[int, int], end: tuple[int, int]) -> None:
+    """把起点/终点从左右边界接入最近的节点（近乎水平的短通道）。"""
+    sx, sy = start
+    ex, ey = end
+    left_idx = min(range(len(nodes)),
+                   key=lambda k: (nodes[k][0] - sx) ** 2 + (nodes[k][1] - sy) ** 2)
+    right_idx = min(range(len(nodes)),
+                    key=lambda k: (nodes[k][0] - ex) ** 2 + (nodes[k][1] - ey) ** 2)
+    lx, ly, _ = nodes[left_idx]
+    rx, ry, _ = nodes[right_idx]
+
+    r = rng.uniform(cfg.corridor_radius_min, cfg.corridor_radius_max)
+    _carve_path(grid, cfg.width, cfg.height, (sx, sy), (lx, ly),
+                r, r * 0.9, rng, wobble=0.04)
+    _carve_path(grid, cfg.width, cfg.height, (ex, ey), (rx, ry),
+                r, r * 0.9, rng, wobble=0.04)
+
+
+def _shortest_path(grid, w: int, h: int, start, end):
+    """BFS 求起点→终点最短路径（返回格序列，不含路径则为空列表）。"""
+    n = w * h
+    parent = [-1] * n
+    si = start[1] * w + start[0]
+    ei = end[1] * w + end[0]
+    parent[si] = si
+    queue = deque([si])
+    while queue:
+        cur = queue.popleft()
+        if cur == ei:
+            break
+        cy, cx = divmod(cur, w)
+        if cx > 0:
+            nxt = cur - 1
+            if parent[nxt] == -1 and grid[cy][cx - 1] == EMPTY:
+                parent[nxt] = cur
+                queue.append(nxt)
+        if cx + 1 < w:
+            nxt = cur + 1
+            if parent[nxt] == -1 and grid[cy][cx + 1] == EMPTY:
+                parent[nxt] = cur
+                queue.append(nxt)
+        if cy > 0:
+            nxt = cur - w
+            if parent[nxt] == -1 and grid[cy - 1][cx] == EMPTY:
+                parent[nxt] = cur
+                queue.append(nxt)
+        if cy + 1 < h:
+            nxt = cur + w
+            if parent[nxt] == -1 and grid[cy + 1][cx] == EMPTY:
+                parent[nxt] = cur
+                queue.append(nxt)
+
+    if parent[ei] == -1:
+        return []
+    path = []
+    cur = ei
+    while cur != si:
+        path.append((cur % w, cur // w))
+        cur = parent[cur]
+    path.append(start)
+    path.reverse()
+    return path
+
+
+def _build_protected(path, w: int, h: int, radius: float) -> set[int]:
+    """沿最短路径铺一圈保护带（键 = y*w+x），障碍不得落在这里。"""
+    protected: set[int] = set()
+    r2 = radius * radius
+    step = 2
+    for i in range(0, len(path), step):
+        cx, cy = path[i]
+        y0 = max(0, int(math.floor(cy - radius)))
+        y1 = min(h - 1, int(math.ceil(cy + radius)))
+        for y in range(y0, y1 + 1):
+            dy = y - cy
+            if dy * dy > r2:
+                continue
+            half = math.sqrt(r2 - dy * dy)
+            xa = max(0, int(math.ceil(cx - half)))
+            xb = min(w - 1, int(math.floor(cx + half)))
+            base = y * w
+            for x in range(xa, xb + 1):
+                protected.add(base + x)
+    return protected
+
+
+def _has_clearance(grid, w: int, h: int, cx: float, cy: float,
+                   radius: float) -> bool:
+    """检查中心周围一圈是否全是可通行格（让灰斑完整落在白色区域内）。"""
+    for k in range(12):
+        a = k * math.pi / 6
+        x = int(round(cx + math.cos(a) * radius))
+        y = int(round(cy + math.sin(a) * radius))
+        if not (0 <= x < w and 0 <= y < h) or grid[y][x] != EMPTY:
+            return False
+    return True
+
+
+def _add_obstacles(cfg: Config, rng: random.Random, grid, start, end,
+                   protected: set[int]) -> None:
+    """在通道内投放灰色障碍斑块（椭圆，按通道形状裁剪）。"""
+    w, h = cfg.width, cfg.height
+    placed = 0
+    attempts = 0
+    max_attempts = cfg.obstacle_blobs * 120
+    while placed < cfg.obstacle_blobs and attempts < max_attempts:
+        attempts += 1
+        cx = rng.randrange(2, w - 2)
+        cy = rng.randrange(2, h - 2)
+        if grid[cy][cx] != EMPTY:
+            continue
+        if cy * w + cx in protected:
+            continue
+        if abs(cx - start[0]) + abs(cy - start[1]) < 60:
+            continue
+        if abs(cx - end[0]) + abs(cy - end[1]) < 60:
+            continue
+
+        rx = rng.uniform(cfg.obstacle_radius_min, cfg.obstacle_radius_max)
+        ry = rng.uniform(cfg.obstacle_radius_min, cfg.obstacle_radius_max)
+        if not _has_clearance(grid, w, h, cx, cy, max(rx, ry) + 3):
+            continue  # 白色区域不够大，换一处
+        angle = rng.uniform(0, math.pi)
+        painted = _fill_blob(grid, w, h, cx, cy, rx, ry, angle, protected)
+        if painted:
+            placed += 1
+
+
+def _fill_blob(grid, w: int, h: int, cx: float, cy: float, rx: float, ry: float,
+               angle: float, protected: set[int]) -> int:
+    """填充旋转椭圆斑块，只覆盖可通行格且避开保护带。返回涂改格数。"""
+    ca, sa = math.cos(angle), math.sin(angle)
+    rmax = max(rx, ry)
+    y0 = max(0, int(math.floor(cy - rmax)))
+    y1 = min(h - 1, int(math.ceil(cy + rmax)))
+    painted = 0
+    for y in range(y0, y1 + 1):
+        dy = y - cy
+        row = grid[y]
+        x0 = max(0, int(math.floor(cx - rmax)))
+        x1 = min(w - 1, int(math.ceil(cx + rmax)))
+        base = y * w
+        for x in range(x0, x1 + 1):
+            dx = x - cx
+            u = dx * ca + dy * sa
+            v = -dx * sa + dy * ca
+            if (u * u) / (rx * rx) + (v * v) / (ry * ry) <= 1.0:
+                if row[x] == EMPTY and base + x not in protected:
+                    row[x] = OBSTACLE
+                    painted += 1
+    return painted
 
 
 def generate_maze(cfg: Config) -> Maze:
-    """按配置生成房间式迷宫（房间网格 + 生成树保证连通）。"""
+    """按配置生成有机形态迷宫（节点生成树 + 圆盘笔刷 + 灰色障碍斑块）。"""
     rng = random.Random(cfg.seed if cfg.seed >= 0 else None)
-    cols, rows, room_w, room_h, step_w, step_h = _room_layout(cfg)
-    grid = _build_rooms_grid(cfg, cols, rows, room_w, room_h, step_w, step_h)
-    _open_corridors(rng, cfg, grid, cols, rows, room_w, room_h, step_w, step_h)
+    grid = [[WALL] * cfg.width for _ in range(cfg.height)]
 
+    nodes, cols, rows = _make_nodes(cfg, rng)
     start = (0, cfg.height // 2)
     end = (cfg.width - 1, cfg.height // 2)
-    # 确保起点/终点可通行（起点在左边界，可能在房间内或墙上）
+
+    _carve_skeleton(cfg, rng, grid, nodes, cols, rows)
+    _connect_edges(cfg, rng, grid, nodes, start, end)
+
+    # 起终点处补圆点，保证落在通道内
+    _fill_disk(grid, cfg.width, cfg.height, start[0], start[1], 5.0, EMPTY)
+    _fill_disk(grid, cfg.width, cfg.height, end[0], end[1], 5.0, EMPTY)
+
+    # 保护起点→终点最短路径，障碍不会切断主通路
+    path = _shortest_path(grid, cfg.width, cfg.height, start, end)
+    margin = cfg.obstacle_radius_max + 3
+    protected = _build_protected(path, cfg.width, cfg.height, margin) if path else set()
+    _add_obstacles(cfg, rng, grid, start, end, protected)
+
     grid[start[1]][start[0]] = EMPTY
     grid[end[1]][end[0]] = EMPTY
-
     return Maze(cfg.width, cfg.height, grid, start, end)
