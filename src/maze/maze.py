@@ -38,9 +38,14 @@ class Config:
     obstacle_blobs: int = 12       # 灰色障碍斑块数量
     obstacle_radius_min: int = 12  # 障碍斑块最小半径（格）
     obstacle_radius_max: int = 26  # 障碍斑块最大半径（格）
-    view_size: int = 10
+    view_size: int = 25
     step_interval: float = 0.002
     max_steps: int = 500_000
+    cost_right: float = 1.0        # 向右移动代价
+    cost_vertical: float = 2.0     # 向上/下移动代价
+    cost_left: float = 4.0         # 向左回退代价
+    suspect_penalty: float = 20.0  # 穿过「疑似障碍」格的附加代价
+    plan_expand_limit: int = 200_000  # 单次规划最大扩展格数
     cell_px: int = 2
 
 
@@ -75,6 +80,24 @@ class Maze:
         if x < 0 or x >= self.width or y < 0 or y >= self.height:
             return True
         return self.grid[y][x] != EMPTY
+
+    def sense(self, x: int, y: int):
+        """传感器读数：墙与可通行可见，灰色障碍不可见（返回 None）。
+
+        返回 WALL / EMPTY / None（越界或灰色障碍不可见）。
+        """
+        if not self.in_bounds(x, y):
+            return None
+        v = self.grid[y][x]
+        if v == WALL:
+            return WALL
+        if v == OBSTACLE:
+            return None
+        return EMPTY
+
+    def is_goal_marker(self, x: int, y: int) -> bool:
+        """终点标记（红点）是否出现在该格（视野内可见）。"""
+        return (x, y) == self.end
 
     def in_bounds(self, x: int, y: int) -> bool:
         return 0 <= x < self.width and 0 <= y < self.height

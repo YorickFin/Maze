@@ -1,11 +1,13 @@
 """pywebview 可视化模块。
 
-三栏渲染（参考示例图配色：黑=墙，白=可通行，灰=障碍，蓝=起点，红=终点）：
-- 右栏：完整地图（含墙、灰色障碍、起点、终点）。
-- 中栏：以破解方为中心的 view_size×view_size 实时视野，障碍不可见。
-- 左栏：已探索合成图（走过格 + 推断障碍）。
+三栏渲染（黑=墙，白=可通行，灰=障碍，蓝=起点，红=终点）：
+- 右栏：完整地图（含墙、灰色障碍、起点、终点），底图只在启动时绘制一次。
+- 中栏：以破解方为中心的 view_size×view_size 实时视野；墙可见、通道可见，
+  灰色障碍不可见（只有被「受阻」确认后才显示为灰）。
+- 左栏：已探索合成图（白色已探索、黑色已知墙、灰色推断障碍、蓝色轨迹）。
 
-前端通过 pywebview.api.get_state() 轮询状态，get_state() 返回 JSON 字符串。
+状态传输：`get_map()` 只在启动时返回一次全图；`get_state()` 之后只返回
+位置/步数/受阻/状态与增量集合，避免每帧重传 1000×1000 网格。
 """
 
 from __future__ import annotations
@@ -13,7 +15,7 @@ from __future__ import annotations
 import json
 
 from .maze import Config, Maze
-from .solver import KNOWN_WALL, Solver
+from .solver import Solver
 
 _HTML_TEMPLATE = """<!DOCTYPE html>
 <html>
@@ -43,24 +45,33 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   <span id="stats">步数 0 | 受阻 0 | 状态：探索中</span>
 </div>
 <div id="panels">
-  <div class="panel"><h3>左 · 已探索合成图（黑=未探索 白=已探索 灰=推断障碍）</h3><div class="wrap"><canvas id="c-left"></canvas></div></div>
-  <div class="panel"><h3>中 · 实时视野 (VIEWSIZE×VIEWSIZE, 障碍不可见)</h3><div class="wrap"><canvas id="c-mid"></canvas></div></div>
+  <div class="panel"><h3>左 · 已探索合成图（黑=墙/未探索 白=通道 灰=推断障碍）</h3><div class="wrap"><canvas id="c-left"></canvas></div></div>
+  <div class="panel"><h3>中 · 实时视野 (VIEWSIZE×VIEWSIZE, 墙可见 障碍不可见)</h3><div class="wrap"><canvas id="c-mid"></canvas></div></div>
   <div class="panel"><h3>右 · 完整地图（黑=墙 白=可通行 灰=障碍）</h3><div class="wrap"><canvas id="c-right"></canvas></div></div>
 </div>
 <script>
-const cell = 16;                // 中栏每格像素（10×10 → 160px）
-const leftCell = 8;             // 左栏每格像素
-const fullCell = 1;             // 右栏完整地图每格像素（W 格 → W px）
-const vs = VIEWSIZE;
-const C_WALL = '#000000';       // 墙体：黑
-const C_EMPTY = '#ffffff';      // 可通行：白
-const C_OBS = '#808080';        // 障碍：灰
-const C_START = '#0070ff';      // 起点：蓝
-const C_END = '#ff2d2d';        // 终点：红
-const C_POS = '#ffd400';        // 破解方：黄
-const C_TRAIL = 'rgba(60,140,255,0.45)';
-let speed = 50;
+const CELL = 16;                 // 中栏每格像素
+const VS = VIEWSIZE;             // 视野边长（格）
+const C_WALL = '#000000';
+const C_EMPTY = '#ffffff';
+const C_OBS = '#808080';
+const C_START = '#0070ff';
+const C_END = '#ff2d2d';
+const C_POS = '#ffd400';
+const C_TRAIL = '#4a9eff';
+
+let MAP = null;
+let rightBase = null;
+let leftBase = null;
+let leftCtx = null;
+let bbox = null;                 // 左栏绘制范围 {minX,minY,maxX,maxY}
 let paused = false;
+let busy = false;
+
+const explored = new Set();
+const visited = new Set();
+const walls = new Set();
+const obstacles = new Set();
 
 const cRight = document.getElementById('c-right');
 const cMid = document.getElementById('c-mid');
@@ -76,146 +87,196 @@ function dot(ctx, x, y, r, color) {
   ctx.fill();
 }
 
-function drawRight(st) {
-  const W = st.width, H = st.height;
-  cRight.width = W * fullCell;
-  cRight.height = H * fullCell;
-  const ctx = cRight.getContext('2d');
-  const img = ctx.createImageData(W, H);
+function cellFill(ctx, key, color) {
+  const p = key.split(',');
+  ctx.fillStyle = color;
+  ctx.fillRect(+p[0], +p[1], 1, 1);
+}
+
+function expandBBox(key) {
+  const p = key.split(',');
+  const x = +p[0], y = +p[1];
+  if (!bbox) { bbox = {minX: x, minY: y, maxX: x, maxY: y}; return; }
+  if (x < bbox.minX) bbox.minX = x;
+  if (y < bbox.minY) bbox.minY = y;
+  if (x > bbox.maxX) bbox.maxX = x;
+  if (y > bbox.maxY) bbox.maxY = y;
+}
+
+function buildBase() {
+  const W = MAP.width, H = MAP.height;
+  rightBase = document.createElement('canvas');
+  rightBase.width = W;
+  rightBase.height = H;
+  const bctx = rightBase.getContext('2d');
+  const img = bctx.createImageData(W, H);
   const d = img.data;
   for (let y = 0; y < H; y++) {
-    const row = st.grid[y];
+    const row = MAP.grid[y];
     for (let x = 0; x < W; x++) {
       const i = (y * W + x) * 4;
       const v = row[x];
-      if (v === 1) { d[i]=0; d[i+1]=0; d[i+2]=0; }
-      else if (v === 2) { d[i]=128; d[i+1]=128; d[i+2]=128; }
-      else { d[i]=255; d[i+1]=255; d[i+2]=255; }
-      d[i+3]=255;
+      if (v === 1) { d[i] = 0; d[i+1] = 0; d[i+2] = 0; }
+      else if (v === 2) { d[i] = 128; d[i+1] = 128; d[i+2] = 128; }
+      else { d[i] = 255; d[i+1] = 255; d[i+2] = 255; }
+      d[i+3] = 255;
     }
   }
-  ctx.putImageData(img, 0, 0);
-  // 已探索轨迹（半透明蓝）
+  bctx.putImageData(img, 0, 0);
+
+  leftBase = document.createElement('canvas');
+  leftBase.width = W;
+  leftBase.height = H;
+  leftCtx = leftBase.getContext('2d');
+  leftCtx.fillStyle = C_WALL;
+  leftCtx.fillRect(0, 0, W, H);
+}
+
+function mergeState(st) {
+  if (st.newExplored.length) {
+    leftCtx.fillStyle = C_EMPTY;
+    for (const k of st.newExplored) {
+      if (!explored.has(k)) { explored.add(k); expandBBox(k); }
+      cellFill(leftCtx, k, C_EMPTY);
+    }
+  }
+  if (st.newWalls.length) {
+    for (const k of st.newWalls) { walls.add(k); expandBBox(k); }
+    leftCtx.fillStyle = C_WALL;
+    for (const k of st.newWalls) cellFill(leftCtx, k, C_WALL);
+  }
+  if (st.newObstacles.length) {
+    for (const k of st.newObstacles) { obstacles.add(k); expandBBox(k); }
+    leftCtx.fillStyle = C_OBS;
+    for (const k of st.newObstacles) cellFill(leftCtx, k, C_OBS);
+  }
+  if (st.newVisited.length) {
+    for (const k of st.newVisited) { visited.add(k); expandBBox(k); }
+    leftCtx.fillStyle = C_TRAIL;
+    for (const k of st.newVisited) cellFill(leftCtx, k, C_TRAIL);
+  }
+}
+
+function drawRight(st) {
+  cRight.width = MAP.width;
+  cRight.height = MAP.height;
+  const ctx = cRight.getContext('2d');
+  ctx.drawImage(rightBase, 0, 0);
   ctx.fillStyle = C_TRAIL;
-  for (const v of st.visited) ctx.fillRect(v[0]*fullCell, v[1]*fullCell, fullCell, fullCell);
-  // 起点蓝 / 终点红
-  dot(ctx, st.start[0], st.start[1], 7, C_START);
-  dot(ctx, st.end[0], st.end[1], 7, C_END);
-  // 破解方当前位置（黄）
-  dot(ctx, st.pos[0], st.pos[1], 4, C_POS);
+  for (const k of visited) {
+    const p = k.split(',');
+    ctx.fillRect(+p[0], +p[1], 2, 2);  // 2px 保证缩略后仍可见
+  }
+  dot(ctx, MAP.start[0], MAP.start[1], 10, C_START);
+  dot(ctx, MAP.end[0], MAP.end[1], 10, C_END);
+  // 当前位置用空心黄环，避免盖住终点红点
+  const px = Math.min(Math.max(8, st.pos[0]), MAP.width - 8);
+  const py = Math.min(Math.max(8, st.pos[1]), MAP.height - 8);
+  ctx.beginPath();
+  ctx.arc(px, py, 8, 0, Math.PI * 2);
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = C_POS;
+  ctx.stroke();
 }
 
 function drawMid(st) {
+  const half = Math.floor(VS / 2);
   const px = st.pos[0], py = st.pos[1];
-  const half = Math.floor(vs / 2);
-  cMid.width = vs * cell;
-  cMid.height = vs * cell;
+  cMid.width = VS * CELL;
+  cMid.height = VS * CELL;
   const ctx = cMid.getContext('2d');
-  // 视野内障碍不可见：底色统一为白（可通行色）
   ctx.fillStyle = C_EMPTY;
   ctx.fillRect(0, 0, cMid.width, cMid.height);
-  for (let vy = 0; vy < vs; vy++) {
-    for (let vx = 0; vx < vs; vx++) {
+  for (let vy = 0; vy < VS; vy++) {
+    for (let vx = 0; vx < VS; vx++) {
       const gx = px - half + vx;
       const gy = py - half + vy;
       const key = gx + ',' + gy;
-      // 已走过轨迹（蓝）
-      if (st.visitedSet.has(key)) {
-        ctx.fillStyle = C_TRAIL;
-        ctx.fillRect(vx*cell, vy*cell, cell, cell);
-      }
-      // 推断障碍（灰，仅因受阻确认，属"推断"而非"看见"）
-      if (st.knownWalls.has(key)) {
+      if (gx < 0 || gx >= MAP.width || gy < 0 || gy >= MAP.height || walls.has(key)) {
+        ctx.fillStyle = C_WALL;
+        ctx.fillRect(vx*CELL, vy*CELL, CELL, CELL);
+      } else if (obstacles.has(key)) {
         ctx.fillStyle = C_OBS;
-        ctx.fillRect(vx*cell, vy*cell, cell, cell);
+        ctx.fillRect(vx*CELL, vy*CELL, CELL, CELL);
+      }
+      if (visited.has(key)) {
+        ctx.fillStyle = C_TRAIL;
+        ctx.fillRect(vx*CELL, vy*CELL, CELL, CELL);
       }
       ctx.strokeStyle = '#e6e6e6';
-      ctx.strokeRect(vx*cell, vy*cell, cell, cell);
+      ctx.strokeRect(vx*CELL, vy*CELL, CELL, CELL);
     }
   }
-  // 起终点（若在视野内）：蓝 / 红
   const marker = (gx, gy, color) => {
-    const cx = (gx - px + half) * cell + cell / 2;
-    const cy = (gy - py + half) * cell + cell / 2;
+    const cx = (gx - px + half) * CELL + CELL / 2;
+    const cy = (gy - py + half) * CELL + CELL / 2;
     if (cx >= 0 && cx <= cMid.width && cy >= 0 && cy <= cMid.height) {
-      ctx.beginPath(); ctx.arc(cx, cy, cell * 0.45, 0, Math.PI * 2);
+      ctx.beginPath(); ctx.arc(cx, cy, CELL * 0.45, 0, Math.PI * 2);
       ctx.fillStyle = color; ctx.fill();
     }
   };
-  marker(st.start[0], st.start[1], C_START);
-  marker(st.end[0], st.end[1], C_END);
   // 破解方位置（中心，黄 + 黑描边）
   ctx.fillStyle = C_POS;
-  ctx.fillRect(half*cell, half*cell, cell, cell);
+  ctx.fillRect(half*CELL, half*CELL, CELL, CELL);
   ctx.strokeStyle = C_WALL;
-  ctx.strokeRect(half*cell, half*cell, cell, cell);
-  ctx.strokeStyle = C_WALL;
+  ctx.strokeRect(half*CELL, half*CELL, CELL, CELL);
+  // 起终点标记最后绘制：站在红点上时仍能看到终点
+  marker(MAP.start[0], MAP.start[1], C_START);
+  marker(MAP.end[0], MAP.end[1], C_END);
   ctx.lineWidth = 2;
   ctx.strokeRect(0, 0, cMid.width, cMid.height);
 }
 
 function drawLeft(st) {
-  const W = st.width, H = st.height;
-  let minX = W, minY = H, maxX = 0, maxY = 0;
-  const inr = (x,y) => x>=minX && x<=maxX && y>=minY && y<=maxY;
-  // 探索范围以「视野扫过」explored 为准
-  for (const k of st.explored) {
-    const p = k.split(',').map(Number);
-    if (p[0]<minX) minX=p[0]; if (p[0]>maxX) maxX=p[0];
-    if (p[1]<minY) minY=p[1]; if (p[1]>maxY) maxY=p[1];
-  }
-  for (const k of st.knownWalls) {
-    const p = k.split(',').map(Number);
-    if (p[0]<minX) minX=p[0]; if (p[0]>maxX) maxX=p[0];
-    if (p[1]<minY) minY=p[1]; if (p[1]>maxY) maxY=p[1];
-  }
+  if (!bbox) return;
   const pad = 8;
-  minX = Math.max(0, minX - pad); minY = Math.max(0, minY - pad);
-  maxX = Math.min(W - 1, maxX + pad); maxY = Math.min(H - 1, maxY + pad);
+  const minX = Math.max(0, bbox.minX - pad);
+  const minY = Math.max(0, bbox.minY - pad);
+  const maxX = Math.min(MAP.width - 1, bbox.maxX + pad);
+  const maxY = Math.min(MAP.height - 1, bbox.maxY + pad);
   const gw = maxX - minX + 1, gh = maxY - minY + 1;
-  cLeft.width = gw * leftCell;
-  cLeft.height = gh * leftCell;
+  const scale = Math.max(1, Math.min(8, Math.floor(760 / Math.max(gw, gh))));
+  cLeft.width = gw * scale;
+  cLeft.height = gh * scale;
   const ctx = cLeft.getContext('2d');
-  // 未探索区域：黑（与墙体同色）
-  ctx.fillStyle = C_WALL;
-  ctx.fillRect(0, 0, cLeft.width, cLeft.height);
-  // 已感知区域（视野扫过）：白（可通行色）
-  ctx.fillStyle = C_EMPTY;
-  for (const k of st.explored) {
-    const p = k.split(',').map(Number);
-    ctx.fillRect((p[0]-minX)*leftCell, (p[1]-minY)*leftCell, leftCell, leftCell);
-  }
-  // 实际走过的路径：半透明蓝
-  ctx.fillStyle = C_TRAIL;
-  for (const v of st.visited) {
-    ctx.fillRect((v[0]-minX)*leftCell, (v[1]-minY)*leftCell, leftCell, leftCell);
-  }
-  // 推断障碍：灰
-  ctx.fillStyle = C_OBS;
-  for (const k of st.knownWalls) {
-    const p = k.split(',').map(Number);
-    ctx.fillRect((p[0]-minX)*leftCell, (p[1]-minY)*leftCell, leftCell, leftCell);
-  }
-  if (inr(st.start[0],st.start[1])) dot(ctx,(st.start[0]-minX)*leftCell+leftCell/2,(st.start[1]-minY)*leftCell+leftCell/2,leftCell*0.7,C_START);
-  if (inr(st.end[0],st.end[1])) dot(ctx,(st.end[0]-minX)*leftCell+leftCell/2,(st.end[1]-minY)*leftCell+leftCell/2,leftCell*0.7,C_END);
-  dot(ctx,(st.pos[0]-minX)*leftCell+leftCell/2,(st.pos[1]-minY)*leftCell+leftCell/2,leftCell*0.6,C_POS);
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(leftBase, minX, minY, gw, gh, 0, 0, gw * scale, gh * scale);
+
+  const marker = (gx, gy, color, r) => {
+    if (gx < minX || gx > maxX || gy < minY || gy > maxY) return;
+    ctx.beginPath();
+    ctx.arc((gx - minX) * scale + scale / 2, (gy - minY) * scale + scale / 2,
+            Math.max(2, scale * r), 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+  };
+  marker(MAP.start[0], MAP.start[1], C_START, 0.7);
+  marker(MAP.end[0], MAP.end[1], C_END, 0.7);
+  marker(st.pos[0], st.pos[1], C_POS, 0.6);
 }
 
 async function tick() {
-  if (!paused) {
+  requestAnimationFrame(tick);
+  if (!MAP || paused || busy) return;
+  busy = true;
+  try {
     const st = JSON.parse(await window.pywebview.api.get_state());
-    // Python 返回数组，转成 Set 供 includes/has 使用
-    st.visitedSet = new Set(st.visitedSet || []);
-    st.knownWalls = new Set(st.knownWalls || []);
-    st.exploredSet = new Set(st.explored || []);
+    mergeState(st);
     drawRight(st); drawMid(st); drawLeft(st);
     document.getElementById('stats').textContent =
       '步数 ' + st.steps + ' | 受阻 ' + st.blocked + ' | 状态：' + st.status;
     if (st.status !== '完成' && st.status !== '卡死') {
       await window.pywebview.api.advance();
     }
+  } finally {
+    busy = false;
   }
-  requestAnimationFrame(tick);
+}
+
+async function boot() {
+  MAP = JSON.parse(await window.pywebview.api.get_map());
+  buildBase();
+  tick();
 }
 
 document.getElementById('btn-pause').onclick = function() {
@@ -223,11 +284,10 @@ document.getElementById('btn-pause').onclick = function() {
   this.textContent = paused ? '继续' : '暂停';
 };
 document.getElementById('speed').oninput = function() {
-  speed = parseInt(this.value);
-  window.pywebview.api.set_speed(speed);
+  window.pywebview.api.set_speed(parseInt(this.value));
 };
 
-window.addEventListener('pywebviewready', function() { tick(); });
+window.addEventListener('pywebviewready', boot);
 </script>
 </body>
 </html>
@@ -239,6 +299,10 @@ def build_html(view_size: int) -> str:
     return _HTML_TEMPLATE.replace("VIEWSIZE", str(view_size))
 
 
+def _key(cell: tuple[int, int]) -> str:
+    return f"{cell[0]},{cell[1]}"
+
+
 class Api:
     """暴露给前端的 JS API。"""
 
@@ -248,29 +312,47 @@ class Api:
         self.cfg = cfg
         self.speed = 50  # 1-100
 
-    def get_state(self) -> str:
-        s = self.solver
-        st = {
+    def get_map(self) -> str:
+        """全图只在启动时返回一次，之后由前端缓存。"""
+        return json.dumps({
             "width": self.maze.width,
             "height": self.maze.height,
             "grid": self.maze.grid,
             "start": list(self.maze.start),
             "end": list(self.maze.end),
+        }, separators=(",", ":"))
+
+    def get_state(self) -> str:
+        """每帧只返回增量与标量，不再重传全图。"""
+        s = self.solver
+        if s.pos == self.maze.end:
+            status = "完成"
+        elif s.done:
+            status = "卡死"
+        else:
+            status = "探索中"
+        st = {
             "pos": list(s.pos),
-            "visited": [list(v) for v in s.visited],
-            "visitedSet": [f"{v[0]},{v[1]}" for v in s.visited],
-            "explored": [f"{c[0]},{c[1]}" for c in s.explored],
-            "knownWalls": [f"{c[0]},{c[1]}" for c in s.known if s.known[c] == KNOWN_WALL],
             "steps": s.step_count,
             "blocked": s.blocked_hits,
-            "status": "完成" if s.reached_end else ("卡死" if s.done else "探索中"),
+            "status": status,
+            "newExplored": [_key(c) for c in s.new_explored],
+            "newVisited": [_key(c) for c in s.new_visited],
+            "newWalls": [_key(c) for c in s.new_walls],
+            "newObstacles": [_key(c) for c in s.new_obstacles],
         }
-        return json.dumps(st)
+        s.new_explored.clear()
+        s.new_visited.clear()
+        s.new_walls.clear()
+        s.new_obstacles.clear()
+        return json.dumps(st, separators=(",", ":"))
 
     def advance(self) -> None:
-        """按速度推进若干步。速度 1-100 → 单帧 1~200 步。"""
+        """按速度推进若干步；到达终点即停。"""
         n = 1 + self.speed * 2
         for _ in range(n):
+            if self.solver.pos == self.maze.end:
+                break
             if not self.solver.step():
                 break
 

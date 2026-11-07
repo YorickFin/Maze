@@ -30,12 +30,20 @@ radius_min = 12
 radius_max = 26
 
 [solver]
-# 破解方视野边长（格）：10x10
-view_size = 10
-# 移动步进间隔（秒/步），越小越快
-step_interval = 0.002
-# A* 探测推进的步数上限（防死循环）
+# 破解方视野边长（格）：只在该范围内相信「墙/通道可见」
+view_size = 25
+# 移动方向代价：右 1、上/下 2、左 4（天然右向优先，左向仅作回溯）
+cost_right = 1.0
+cost_vertical = 2.0
+cost_left = 4.0
+# 穿过「已观测但未知」的疑似障碍格的附加代价（越大越倾向绕行）
+suspect_penalty = 20.0
+# 单次规划允许扩展的最大格数（防止极端地图上长时间阻塞）
+plan_expand_limit = 200000
+# 移动步数上限（防死循环）
 max_steps = 500000
+# 移动步进间隔（秒/步），保留字段
+step_interval = 0.002
 
 [visual]
 # 每个网格在画布上的像素大小

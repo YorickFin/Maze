@@ -41,9 +41,14 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
         obstacle_blobs=int(obs.get("blobs", 12)),
         obstacle_radius_min=int(obs.get("radius_min", 12)),
         obstacle_radius_max=int(obs.get("radius_max", 26)),
-        view_size=int(solver_cfg.get("view_size", 10)),
+        view_size=int(solver_cfg.get("view_size", 25)),
         step_interval=float(solver_cfg.get("step_interval", 0.002)),
         max_steps=int(solver_cfg.get("max_steps", 500_000)),
+        cost_right=float(solver_cfg.get("cost_right", 1.0)),
+        cost_vertical=float(solver_cfg.get("cost_vertical", 2.0)),
+        cost_left=float(solver_cfg.get("cost_left", 4.0)),
+        suspect_penalty=float(solver_cfg.get("suspect_penalty", 20.0)),
+        plan_expand_limit=int(solver_cfg.get("plan_expand_limit", 200_000)),
         cell_px=int(vis.get("cell_px", 2)),
     )
 
@@ -51,7 +56,16 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
 def main() -> None:
     cfg = load_config()
     maze = generate_maze(cfg)
-    solver = Solver(maze, view_size=cfg.view_size, max_steps=cfg.max_steps)
+    solver = Solver(
+        maze,
+        view_size=cfg.view_size,
+        max_steps=cfg.max_steps,
+        cost_right=cfg.cost_right,
+        cost_vertical=cfg.cost_vertical,
+        cost_left=cfg.cost_left,
+        suspect_penalty=cfg.suspect_penalty,
+        plan_expand_limit=cfg.plan_expand_limit,
+    )
 
     # 简单预检查：起点是否被墙或障碍覆盖
     if maze.is_blocked(*maze.start):
