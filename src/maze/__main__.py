@@ -49,7 +49,15 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
         cost_left=float(solver_cfg.get("cost_left", 10.0)),
         suspect_penalty=float(solver_cfg.get("suspect_penalty", 20.0)),
         plan_expand_limit=int(solver_cfg.get("plan_expand_limit", 200_000)),
-        wall_follow=bool(solver_cfg.get("wall_follow", True)),
+        wall_follow=bool(solver_cfg.get("wall_follow", False)),
+        cluster_enabled=bool(solver_cfg.get("cluster_enabled", True)),
+        cluster_gain_weight=float(solver_cfg.get("cluster_gain_weight", 2.0)),
+        cluster_right_weight=float(solver_cfg.get("cluster_right_weight", 0.0)),
+        cluster_cost_weight=float(solver_cfg.get("cluster_cost_weight", 1.0)),
+        cluster_min_size=int(solver_cfg.get("cluster_min_size", 5)),
+        cluster_top_k=int(solver_cfg.get("cluster_top_k", 4)),
+        cluster_gain_radius=int(solver_cfg.get("cluster_gain_radius", 10)),
+        cluster_expand_limit=int(solver_cfg.get("cluster_expand_limit", 10_000)),
         cell_px=int(vis.get("cell_px", 2)),
     )
 
@@ -67,6 +75,14 @@ def main() -> None:
         suspect_penalty=cfg.suspect_penalty,
         plan_expand_limit=cfg.plan_expand_limit,
         wall_follow=cfg.wall_follow,
+        cluster_enabled=cfg.cluster_enabled,
+        cluster_gain_weight=cfg.cluster_gain_weight,
+        cluster_right_weight=cfg.cluster_right_weight,
+        cluster_cost_weight=cfg.cluster_cost_weight,
+        cluster_min_size=cfg.cluster_min_size,
+        cluster_top_k=cfg.cluster_top_k,
+        cluster_gain_radius=cfg.cluster_gain_radius,
+        cluster_expand_limit=cfg.cluster_expand_limit,
     )
 
     # 简单预检查：起点是否被墙或障碍覆盖

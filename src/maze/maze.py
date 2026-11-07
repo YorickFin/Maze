@@ -46,7 +46,15 @@ class Config:
     cost_left: float = 10.0        # 向左回退代价
     suspect_penalty: float = 20.0  # 穿过「疑似障碍」格的附加代价
     plan_expand_limit: int = 200_000  # 单次规划最大扩展格数
-    wall_follow: bool = True       # 是否启用「沿墙为主」模式
+    wall_follow: bool = False      # 是否启用「沿墙为主」模式（默认关闭，改用聚类）
+    cluster_enabled: bool = True   # 是否启用前沿聚类 + gain 效用
+    cluster_gain_weight: float = 2.0   # 信息增益权重
+    cluster_right_weight: float = 0.0  # 右向进度权重
+    cluster_cost_weight: float = 1.0   # 路径代价权重
+    cluster_min_size: int = 5          # 前沿簇最小格数
+    cluster_top_k: int = 4             # 一次 Dijkstra 精确评估的簇数量
+    cluster_gain_radius: int = 10      # 信息增益统计半径（21×21）
+    cluster_expand_limit: int = 10_000 # 单次规划扩展上限
     cell_px: int = 2
 
 

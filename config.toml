@@ -36,8 +36,17 @@ view_size = 25
 cost_right = 1.0
 cost_vertical = 3.0
 cost_left = 10.0
-# 沿墙为主模式：右手法则（右→直→左→后），打转/卡住时自动切前沿规划
-wall_follow = true
+# 沿墙为主模式：右手法则（右→直→左→后）；默认关闭，改用前沿聚类
+wall_follow = false
+# 前沿聚类 + gain 效用（主策略）
+cluster_enabled = true
+cluster_gain_weight = 2.0
+cluster_right_weight = 0.0
+cluster_cost_weight = 1.0
+cluster_min_size = 5
+cluster_top_k = 4
+cluster_gain_radius = 10
+cluster_expand_limit = 10000
 # 穿过「已观测但未知」的疑似障碍格的附加代价（越大越倾向绕行）
 suspect_penalty = 20.0
 # 单次规划允许扩展的最大格数（防止极端地图上长时间阻塞）

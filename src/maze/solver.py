@@ -40,7 +40,15 @@ class Solver:
     def __init__(self, maze: Maze, view_size: int, max_steps: int,
                  cost_right: float = 1.0, cost_vertical: float = 3.0,
                  cost_left: float = 10.0, suspect_penalty: float = 20.0,
-                 plan_expand_limit: int = 200_000, wall_follow: bool = True):
+                 plan_expand_limit: int = 200_000, wall_follow: bool = False,
+                 cluster_enabled: bool = True,
+                 cluster_gain_weight: float = 2.0,
+                 cluster_right_weight: float = 0.0,
+                 cluster_cost_weight: float = 1.0,
+                 cluster_min_size: int = 5,
+                 cluster_top_k: int = 4,
+                 cluster_gain_radius: int = 10,
+                 cluster_expand_limit: int = 10_000):
         self.maze = maze
         self.view_size = view_size
         self.max_steps = max_steps
@@ -50,6 +58,14 @@ class Solver:
         self.suspect_penalty = suspect_penalty
         self.plan_expand_limit = plan_expand_limit
         self.wall_follow = wall_follow
+        self.cluster_enabled = cluster_enabled
+        self.cluster_gain_weight = cluster_gain_weight
+        self.cluster_right_weight = cluster_right_weight
+        self.cluster_cost_weight = cluster_cost_weight
+        self.cluster_min_size = cluster_min_size
+        self.cluster_top_k = cluster_top_k
+        self.cluster_gain_radius = cluster_gain_radius
+        self.cluster_expand_limit = cluster_expand_limit
 
         # 模式状态：默认沿墙；打转/四向不可行后永久切到规划
         self.mode = MODE_WALL if wall_follow else MODE_PLAN
@@ -83,6 +99,7 @@ class Solver:
         self.new_obstacles: list[tuple[int, int]] = []
 
         self.known[maze.start] = KNOWN_EMPTY
+        self.frontier: set[tuple[int, int]] = set()  # 已知可通行且邻接未观测区域的格
         self._obs_pos: tuple[int, int] | None = None
         self._observe(full=True)  # 初始完整视野
 
@@ -95,6 +112,7 @@ class Solver:
         非全量模式下只扫描本次移动新进入的那一条视野边（25 格）。
         """
         half = self.view_size // 2
+        n0 = len(self.new_explored)
         if full or self._obs_pos is None:
             x0 = self.pos[0] - half
             y0 = self.pos[1] - half
@@ -135,6 +153,22 @@ class Solver:
             elif v == EMPTY:
                 self.known[cell] = KNOWN_EMPTY
         self._obs_pos = self.pos
+
+        # 增量维护 frontier：只检查本次新观测格及其四邻
+        for cell in self.new_explored[n0:]:
+            self._update_frontier(cell)
+            for dx, dy in DIRS:
+                nb = (cell[0] + dx, cell[1] + dy)
+                if self.maze.in_bounds(nb[0], nb[1]):
+                    self._update_frontier(nb)
+
+    def _update_frontier(self, cell: tuple[int, int]) -> None:
+        """重算某格是否属于 frontier（已知可通行且邻接未观测区域）。"""
+        if (self.known.get(cell) == KNOWN_EMPTY
+                and self._unexplored_neighbor(cell) is not None):
+            self.frontier.add(cell)
+        else:
+            self.frontier.discard(cell)
 
     def _try_move(self, nx: int, ny: int) -> bool:
         """尝试移动一格。受阻时标记障碍/墙并返回 False。"""
@@ -236,6 +270,106 @@ class Solver:
                     heapq.heappush(heap, (nd, counter, nb))
         return False
 
+    # ---- 前沿聚类 + gain 效用（主策略） ----
+
+    def _frontier_clusters(self) -> list[list[tuple[int, int]]]:
+        """把 frontier 格按 4-邻接聚类，过滤过小的碎簇。"""
+        frontier = self.frontier
+        seen: set[tuple[int, int]] = set()
+        clusters: list[list[tuple[int, int]]] = []
+        for c in frontier:
+            if c in seen:
+                continue
+            comp: list[tuple[int, int]] = []
+            stack = [c]
+            seen.add(c)
+            while stack:
+                q = stack.pop()
+                comp.append(q)
+                for dx, dy in DIRS:
+                    nb = (q[0] + dx, q[1] + dy)
+                    if nb in frontier and nb not in seen:
+                        seen.add(nb)
+                        stack.append(nb)
+            if len(comp) >= self.cluster_min_size:
+                clusters.append(comp)
+        return clusters
+
+    def _gain(self, cell: tuple[int, int], radius: int) -> int:
+        """信息增益估计：代表周围窗口内尚未观测过的格数。"""
+        cnt = 0
+        for y in range(cell[1] - radius, cell[1] + radius + 1):
+            for x in range(cell[0] - radius, cell[0] + radius + 1):
+                if self.maze.in_bounds(x, y) and (x, y) not in self.explored:
+                    cnt += 1
+        return cnt
+
+    def _plan_cluster(self) -> bool:
+        """用一次 Dijkstra 精确评估最近的 K 个前沿簇，再按 gain 效用选目标。"""
+        clusters = self._frontier_clusters()
+        if not clusters:
+            return False
+        start = self.pos
+        reps = [max(c, key=lambda p: (p[0], -abs(p[1] - start[1])))
+                for c in clusters]
+
+        heap: list[tuple[float, int, tuple[int, int]]] = [(0.0, 0, start)]
+        g_score: dict[tuple[int, int], float] = {start: 0.0}
+        came_from: dict[tuple[int, int], tuple[int, int]] = {}
+        counter = 1
+        expanded = 0
+        remaining = set(reps)
+        found: list[tuple[float, tuple[int, int]]] = []
+
+        while heap and len(found) < self.cluster_top_k:
+            d, _, cur = heapq.heappop(heap)
+            if d > g_score.get(cur, float("inf")):
+                continue
+            if cur in remaining:
+                found.append((d, cur))
+                remaining.discard(cur)
+            expanded += 1
+            if expanded > self.cluster_expand_limit:
+                break
+            for dx, dy in DIRS:
+                nb = (cur[0] + dx, cur[1] + dy)
+                if not self.maze.in_bounds(nb[0], nb[1]):
+                    continue
+                if self.known.get(nb) != KNOWN_EMPTY:
+                    continue
+                nd = d + self._direction_cost(dx)
+                if nd < g_score.get(nb, float("inf")):
+                    g_score[nb] = nd
+                    came_from[nb] = cur
+                    counter += 1
+                    heapq.heappush(heap, (nd, counter, nb))
+
+        if not found:
+            return False
+
+        def utility(item: tuple[float, tuple[int, int]]) -> float:
+            cost, rep = item
+            gain = self._gain(rep, self.cluster_gain_radius)
+            dx = rep[0] - start[0]
+            return (self.cluster_gain_weight * gain
+                    + self.cluster_right_weight * dx
+                    - self.cluster_cost_weight * cost)
+
+        _, best = max(found, key=utility)
+        entry = self._unexplored_neighbor(best)
+        if entry is None:
+            return False
+        path = [best]
+        cur = best
+        while cur in came_from:
+            cur = came_from[cur]
+            path.append(cur)
+        path.reverse()
+        self.path = path
+        self.path_idx = 0
+        self.entry = entry
+        return True
+
     def _plan(self) -> bool:
         """用 Dijkstra 找最近（按方向代价）的前沿并生成路径。
 
@@ -247,6 +381,8 @@ class Solver:
         收束」：走向可达的最右可通行格，体现「目标方向偏右」这一先验。
         """
         if self._plan_to_goal():
+            return True
+        if self.cluster_enabled and self._plan_cluster():
             return True
 
         start = self.pos
