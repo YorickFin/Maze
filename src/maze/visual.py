@@ -56,6 +56,15 @@ class Api:
         self.cfg.view_size = value
         self.solver.set_view_size(value)
 
+    def get_move_mode(self) -> str:
+        return "8" if self.cfg.allow_diagonal else "4"
+
+    def set_move_mode(self, mode: str) -> None:
+        """运行时切换 8 向 / 4 向（规划与沿墙同时生效）。"""
+        allow = str(mode) == "8"
+        self.cfg.allow_diagonal = allow
+        self.solver.set_move_mode(allow)
+
     def restart(self) -> str:
         """换随机种子重新生成迷宫，并重建求解器。"""
         self.cfg.seed = random.randrange(1, 2**31)
@@ -94,6 +103,7 @@ class Api:
             "seed": self.cfg.seed,
             "strategy": self.strategy,
             "view_size": self.cfg.view_size,
+            "move_mode": "8" if self.cfg.allow_diagonal else "4",
             "status": status,
             "newExplored": [_key(c) for c in s.new_explored],
             "newVisited": [_key(c) for c in s.new_visited],

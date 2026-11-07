@@ -81,6 +81,8 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
         cluster_top_k=int(solver_cfg.get("cluster_top_k", 4)),
         cluster_gain_radius=int(solver_cfg.get("cluster_gain_radius", 10)),
         cluster_expand_limit=int(solver_cfg.get("cluster_expand_limit", 10_000)),
+        allow_diagonal=bool(solver_cfg.get("allow_diagonal", True)),
+        diagonal_factor=float(solver_cfg.get("diagonal_factor", 1.414)),
         cell_px=int(vis.get("cell_px", 2)),
     )
 

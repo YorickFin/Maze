@@ -47,6 +47,10 @@ cluster_min_size = 5
 cluster_top_k = 4
 cluster_gain_radius = 10
 cluster_expand_limit = 10000
+# 八向移动（规划 + 沿墙）；关闭即回到四向
+allow_diagonal = true
+# 对角移动代价系数（√2）
+diagonal_factor = 1.414
 # 穿过「已观测但未知」的疑似障碍格的附加代价（越大越倾向绕行）
 suspect_penalty = 20.0
 # 单次规划允许扩展的最大格数（防止极端地图上长时间阻塞）

@@ -20,6 +20,7 @@ interface MazeState {
   seed: number
   strategy: string
   view_size?: number
+  move_mode?: string
   status: string
   newExplored: string[]
   newVisited: string[]
@@ -48,6 +49,7 @@ const cLeft = ref<HTMLCanvasElement | null>(null)
 const strategy = ref('cluster')
 const speed = ref(50)
 const viewSize = ref(25)
+const moveMode = ref('8')
 const paused = ref(false)
 const reloading = ref(false)
 const stats = reactive({
@@ -70,6 +72,7 @@ const explored = new Set<string>()
 const visited = new Set<string>()
 const walls = new Set<string>()
 const obstacles = new Set<string>()
+const trace: Vec[] = []
 
 const statusClass = computed(() => {
   if (stats.status === '完成') return 'state done'
@@ -173,6 +176,8 @@ function mergeState(st: MazeState) {
       visited.add(k)
       expandBBox(k)
       cellFill(leftCtx, k, C_TRAIL)
+      const [x, y] = k.split(',').map(Number)
+      trace.push([x, y])
     }
   }
 }
@@ -188,6 +193,19 @@ function drawRight(st: MazeState) {
   for (const k of visited) {
     const [x, y] = k.split(',').map(Number)
     ctx.fillRect(x, y, 2, 2)
+  }
+  // 依次连接访问点（含对角），让八向移动的轨迹连续
+  if (trace.length > 1) {
+    ctx.strokeStyle = C_TRAIL
+    ctx.lineWidth = 1
+    for (let i = 1; i < trace.length; i++) {
+      const [x0, y0] = trace[i - 1]
+      const [x1, y1] = trace[i]
+      ctx.beginPath()
+      ctx.moveTo(x0 + 0.5, y0 + 0.5)
+      ctx.lineTo(x1 + 0.5, y1 + 0.5)
+      ctx.stroke()
+    }
   }
   dot(ctx, MAP.start[0], MAP.start[1], 10, C_START)
   dot(ctx, MAP.end[0], MAP.end[1], 10, C_END)
@@ -317,6 +335,7 @@ function resetView() {
   visited.clear()
   walls.clear()
   obstacles.clear()
+  trace.length = 0
   bbox = null
 }
 
@@ -327,6 +346,7 @@ async function boot() {
   MAP = data
   strategy.value = await api.get_strategy()
   viewSize.value = data.view_size ?? 25
+  moveMode.value = await api.get_move_mode()
   buildBase()
   tick()
 }
@@ -341,6 +361,11 @@ function onSpeed() {
 
 function onViewSize() {
   getApi()?.set_view_size(viewSize.value)
+}
+
+function onMoveMode() {
+  getApi()?.set_move_mode(moveMode.value)
+  trace.length = 0
 }
 
 function onStrategy() {
@@ -396,6 +421,13 @@ onUnmounted(() => {
             <option value="frontier">前沿规划</option>
           </select>
         </label>
+        <label class="field">
+          <span>移动</span>
+          <select v-model="moveMode" @change="onMoveMode">
+            <option value="8">8 向</option>
+            <option value="4">4 向</option>
+          </select>
+        </label>
         <label class="field slider">
           <span>速度</span>
           <input v-model.number="speed" type="range" min="1" max="100" @input="onSpeed" />
@@ -411,6 +443,7 @@ onUnmounted(() => {
         <span class="chip">种子 {{ stats.seed }}</span>
         <span class="chip">步数 {{ stats.steps }}</span>
         <span class="chip">受阻 {{ stats.blocked }}</span>
+        <span class="chip">移动 {{ moveMode }} 向</span>
         <span class="chip accent">{{ STRATEGY_LABEL[stats.strategy] || stats.strategy }}</span>
         <span :class="statusClass">{{ stats.status }}</span>
       </div>

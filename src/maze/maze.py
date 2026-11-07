@@ -55,6 +55,8 @@ class Config:
     cluster_top_k: int = 4             # 一次 Dijkstra 精确评估的簇数量
     cluster_gain_radius: int = 10      # 信息增益统计半径（21×21）
     cluster_expand_limit: int = 10_000 # 单次规划扩展上限
+    allow_diagonal: bool = True        # 是否允许八向移动（规划+沿墙）
+    diagonal_factor: float = 1.414     # 对角移动代价系数
     cell_px: int = 2
 
 

@@ -22,13 +22,23 @@ KNOWN_EMPTY = 1
 KNOWN_WALL = 2      # 视野内直接看到的墙
 KNOWN_OBSTACLE = 3  # 撞上后确认的灰色障碍
 
-# 规划模式的四邻域顺序：右 → 下 → 上 → 左
+# 四邻域（前沿聚类连通性用）：右 → 下 → 上 → 左
 DIRS = ((1, 0), (0, 1), (0, -1), (-1, 0))
 
-# 沿墙模式的绝对方向：0=右, 1=下, 2=左, 3=上（顺时针）
-ABS_DIRS = ((1, 0), (0, 1), (-1, 0), (0, -1))
-# 相对朝向的尝试顺序：右 → 直 → 左 → 后
-WALL_TURNS = (1, 0, 3, 2)
+# 八邻域，顺时针：0=E, 1=SE, 2=S, 3=SW, 4=W, 5=NW, 6=N, 7=NE
+DIRS8 = ((1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1))
+
+# 前沿入口尝试顺序：先正交，后对角
+ENTRY_DIRS = ((1, 0), (0, 1), (0, -1), (-1, 0),
+              (1, 1), (1, -1), (-1, 1), (-1, -1))
+
+# 四向沿墙：E, S, W, N；相对转向 右90 → 直 → 左90 → 掉头
+WALL_DIRS4 = ((1, 0), (0, 1), (-1, 0), (0, -1))
+WALL_TURNS4 = (1, 0, 3, 2)
+
+# 八向沿墙转向顺序：+1(45°右) → +2(90°右) → 0 → -1(45°左)
+# → -2(90°左) → +3(135°右) → -3(135°左) → +4(掉头)
+WALL_TURNS8 = (1, 2, 0, 7, 6, 3, 5, 4)
 
 MODE_WALL = "沿墙"
 MODE_PLAN = "规划"
@@ -48,7 +58,9 @@ class Solver:
                  cluster_min_size: int = 5,
                  cluster_top_k: int = 4,
                  cluster_gain_radius: int = 10,
-                 cluster_expand_limit: int = 10_000):
+                 cluster_expand_limit: int = 10_000,
+                 allow_diagonal: bool = True,
+                 diagonal_factor: float = 1.414):
         self.maze = maze
         self.view_size = view_size
         self.max_steps = max_steps
@@ -66,11 +78,21 @@ class Solver:
         self.cluster_top_k = cluster_top_k
         self.cluster_gain_radius = cluster_gain_radius
         self.cluster_expand_limit = cluster_expand_limit
+        # 八向分支因子更大，限制聚类评估规模以控制耗时
+        if allow_diagonal:
+            self.cluster_top_k = min(self.cluster_top_k, 2)
+            self.cluster_expand_limit = min(self.cluster_expand_limit, 3000)
+        self.allow_diagonal = allow_diagonal
+        self.diagonal_factor = diagonal_factor
+        self.plan_dirs = DIRS8 if allow_diagonal else DIRS
+        self.wall_dirs = DIRS8 if allow_diagonal else WALL_DIRS4
+        self.wall_turns = WALL_TURNS8 if allow_diagonal else WALL_TURNS4
+        self.entry_dirs = ENTRY_DIRS if allow_diagonal else DIRS
 
-        # 模式状态：默认沿墙；打转/四向不可行后永久切到规划
+        # 模式状态：默认沿墙；打转/八向都不可行后永久切到规划
         self.mode = MODE_WALL if wall_follow else MODE_PLAN
-        self.facing = 0            # 0=右, 1=下, 2=左, 3=上
-        self.wall_turn = 0         # 当前尝试的转向序号（0..3）
+        self.facing = 0            # 相对 wall_dirs 的朝向索引
+        self.wall_turn = 0         # 当前尝试的转向序号
         self.wall_states: set[tuple[tuple[int, int], int]] = {(maze.start, 0)}
         self.wall_failed = False   # 是否因打转/卡住触发过兜底
 
@@ -124,6 +146,8 @@ class Solver:
             cluster_top_k=cfg.cluster_top_k,
             cluster_gain_radius=cfg.cluster_gain_radius,
             cluster_expand_limit=cfg.cluster_expand_limit,
+            allow_diagonal=cfg.allow_diagonal,
+            diagonal_factor=cfg.diagonal_factor,
         )
 
     def set_strategy(self, wall_follow: bool, cluster_enabled: bool) -> None:
@@ -149,6 +173,21 @@ class Solver:
         self._obs_pos = None
         self._observe(full=True)
 
+    def set_move_mode(self, allow_diagonal: bool) -> None:
+        """即时切换 4 向 / 8 向（同时作用于规划与沿墙）。"""
+        allow_diagonal = bool(allow_diagonal)
+        self.allow_diagonal = allow_diagonal
+        self.plan_dirs = DIRS8 if allow_diagonal else DIRS
+        self.wall_dirs = DIRS8 if allow_diagonal else WALL_DIRS4
+        self.wall_turns = WALL_TURNS8 if allow_diagonal else WALL_TURNS4
+        self.entry_dirs = ENTRY_DIRS if allow_diagonal else DIRS
+        self._clear_plan()
+        self.facing = 0
+        self.wall_turn = 0
+        self.wall_failed = False
+        self.wall_states = {(self.pos, 0)}
+        self.mode = MODE_WALL if self.wall_follow else MODE_PLAN
+
     # ---- 感知（初始全量，之后只观测新进入的一条视野边） ----
 
     def _observe(self, full: bool = False) -> None:
@@ -168,16 +207,15 @@ class Solver:
         else:
             ox, oy = self._obs_pos
             px, py = self.pos
-            if px > ox:
-                cells = [(px + half, y) for y in range(py - half, py + half + 1)]
-            elif px < ox:
-                cells = [(px - half, y) for y in range(py - half, py + half + 1)]
-            elif py > oy:
-                cells = [(x, py + half) for x in range(px - half, px + half + 1)]
-            elif py < oy:
-                cells = [(x, py - half) for x in range(px - half, px + half + 1)]
-            else:
+            if px == ox and py == oy:
                 return
+            cells = []
+            if px != ox:
+                x = px + (half if px > ox else -half)
+                cells.extend((x, y) for y in range(py - half, py + half + 1))
+            if py != oy:
+                y = py + (half if py > oy else -half)
+                cells.extend((x, y) for x in range(px - half, px + half + 1))
 
         for (gx, gy) in cells:
             if not self.maze.in_bounds(gx, gy):
@@ -200,10 +238,10 @@ class Solver:
                 self.known[cell] = KNOWN_EMPTY
         self._obs_pos = self.pos
 
-        # 增量维护 frontier：只检查本次新观测格及其四邻
+        # 增量维护 frontier：只检查本次新观测格及其八邻
         for cell in self.new_explored[n0:]:
             self._update_frontier(cell)
-            for dx, dy in DIRS:
+            for dx, dy in DIRS8:
                 nb = (cell[0] + dx, cell[1] + dy)
                 if self.maze.in_bounds(nb[0], nb[1]):
                     self._update_frontier(nb)
@@ -216,18 +254,33 @@ class Solver:
         else:
             self.frontier.discard(cell)
 
+    def _mark_blocked(self, x: int, y: int) -> None:
+        """记录一次受阻：墙/障碍并入认知，并累计受阻次数。"""
+        cell = (x, y)
+        if self.maze.is_wall(x, y):
+            self.known[cell] = KNOWN_WALL
+            self.new_walls.append(cell)
+        else:
+            self.known[cell] = KNOWN_OBSTACLE
+            self.new_obstacles.append(cell)
+        self.blocked_hits += 1
+
     def _try_move(self, nx: int, ny: int) -> bool:
-        """尝试移动一格。受阻时标记障碍/墙并返回 False。"""
-        cell = (nx, ny)
+        """尝试移动一格（允许对角，但禁止切角）。受阻时标记并返回 False。"""
+        px, py = self.pos
+        dx, dy = nx - px, ny - py
+        if dx and dy and not self.allow_diagonal:
+            return False  # 四向模式不允许对角
         if self.maze.is_blocked(nx, ny):
-            if self.maze.is_wall(nx, ny):
-                self.known[cell] = KNOWN_WALL
-                self.new_walls.append(cell)
-            else:
-                self.known[cell] = KNOWN_OBSTACLE
-                self.new_obstacles.append(cell)
-            self.blocked_hits += 1
+            self._mark_blocked(nx, ny)
             return False
+        if dx and dy:
+            # 禁止切角：两个相邻正交格都必须可通行
+            for sx, sy in ((nx, py), (px, ny)):
+                if self.maze.is_blocked(sx, sy):
+                    self._mark_blocked(sx, sy)
+                    return False
+        cell = (nx, ny)
         self.known[cell] = KNOWN_EMPTY
         self.pos = cell
         if cell not in self._visited_set:
@@ -239,23 +292,32 @@ class Solver:
 
     # ---- 规划：方向代价 Dijkstra，目标 = 前沿 ----
 
-    def _direction_cost(self, dx: int) -> float:
+    def _direction_cost(self, dx: int, dy: int = 0) -> float:
         if dx > 0:
-            return self.cost_right
-        if dx < 0:
-            return self.cost_left
-        return self.cost_vertical
+            base = self.cost_right
+        elif dx < 0:
+            base = self.cost_left
+        else:
+            base = self.cost_vertical
+        if dx and dy:
+            base *= self.diagonal_factor
+        return base
 
     def _unexplored_neighbor(self, cell: tuple[int, int]) -> tuple[int, int] | None:
-        """返回 cell 的邻格中「从未被观测过」的那一格（右→下→上→左）。"""
+        """返回 cell 的邻格中「从未被观测过」的那一格（正交优先，对角需不切角）。"""
         x, y = cell
-        for dx, dy in DIRS:
+        for dx, dy in self.entry_dirs:
             nx, ny = x + dx, y + dy
             if not self.maze.in_bounds(nx, ny):
                 continue
             nb = (nx, ny)
-            if self.known.get(nb) is None and nb not in self.explored:
-                return nb
+            if self.known.get(nb) is not None or nb in self.explored:
+                continue
+            if dx and dy:
+                if (self.known.get((nx, y)) != KNOWN_EMPTY
+                        or self.known.get((x, ny)) != KNOWN_EMPTY):
+                    continue
+            return nb
         return None
 
     def _plan_to_goal(self) -> bool:
@@ -294,7 +356,7 @@ class Solver:
             if expanded > self.plan_expand_limit:
                 break
             cx, cy = cur
-            for dx, dy in DIRS:
+            for dx, dy in self.plan_dirs:
                 nx, ny = cx + dx, cy + dy
                 if not self.maze.in_bounds(nx, ny):
                     continue
@@ -303,11 +365,17 @@ class Solver:
                 if state == KNOWN_WALL or state == KNOWN_OBSTACLE:
                     continue
                 if state is None:
+                    if dx and dy:
+                        continue  # 对角不穿未知格
                     if nb not in self.explored:
                         continue
-                    step_cost = self._direction_cost(dx) + self.suspect_penalty
+                    step_cost = self._direction_cost(dx, dy) + self.suspect_penalty
                 else:
-                    step_cost = self._direction_cost(dx)
+                    if dx and dy:
+                        if (self.known.get((nx, cy)) != KNOWN_EMPTY
+                                or self.known.get((cx, ny)) != KNOWN_EMPTY):
+                            continue  # 禁止切角
+                    step_cost = self._direction_cost(dx, dy)
                 nd = d + step_cost
                 if nd < g_score.get(nb, float("inf")):
                     g_score[nb] = nd
@@ -377,13 +445,17 @@ class Solver:
             expanded += 1
             if expanded > self.cluster_expand_limit:
                 break
-            for dx, dy in DIRS:
+            for dx, dy in self.plan_dirs:
                 nb = (cur[0] + dx, cur[1] + dy)
                 if not self.maze.in_bounds(nb[0], nb[1]):
                     continue
                 if self.known.get(nb) != KNOWN_EMPTY:
                     continue
-                nd = d + self._direction_cost(dx)
+                if dx and dy:
+                    if (self.known.get((nb[0], cur[1])) != KNOWN_EMPTY
+                            or self.known.get((cur[0], nb[1])) != KNOWN_EMPTY):
+                        continue
+                nd = d + self._direction_cost(dx, dy)
                 if nd < g_score.get(nb, float("inf")):
                     g_score[nb] = nd
                     came_from[nb] = cur
@@ -466,7 +538,7 @@ class Solver:
                 break
 
             cx, cy = cur
-            for dx, dy in DIRS:
+            for dx, dy in self.plan_dirs:
                 nx, ny = cx + dx, cy + dy
                 if not self.maze.in_bounds(nx, ny):
                     continue
@@ -475,11 +547,17 @@ class Solver:
                 if state == KNOWN_WALL or state == KNOWN_OBSTACLE:
                     continue
                 if state is None:
+                    if dx and dy:
+                        continue
                     if nb not in self.explored:
                         continue  # 未观测格只作为前沿目标
-                    step_cost = self._direction_cost(dx) + self.suspect_penalty
+                    step_cost = self._direction_cost(dx, dy) + self.suspect_penalty
                 else:
-                    step_cost = self._direction_cost(dx)
+                    if dx and dy:
+                        if (self.known.get((nx, cy)) != KNOWN_EMPTY
+                                or self.known.get((cx, ny)) != KNOWN_EMPTY):
+                            continue
+                    step_cost = self._direction_cost(dx, dy)
                 nd = d + step_cost
                 if nd < g_score.get(nb, float("inf")):
                     g_score[nb] = nd
@@ -515,9 +593,9 @@ class Solver:
         受阻即标记障碍并换下一个方向。成功后记录 (位置, 朝向) 用于打转检测。
         """
         pos = self.pos
-        for k in range(self.wall_turn, len(WALL_TURNS)):
-            nd = (self.facing + WALL_TURNS[k]) % 4
-            dx, dy = ABS_DIRS[nd]
+        for k in range(self.wall_turn, len(self.wall_turns)):
+            nd = (self.facing + self.wall_turns[k]) % len(self.wall_dirs)
+            dx, dy = self.wall_dirs[nd]
             nx, ny = pos[0] + dx, pos[1] + dy
             if not self.maze.in_bounds(nx, ny):
                 self.wall_turn = k + 1
@@ -526,6 +604,14 @@ class Solver:
             if state == KNOWN_WALL or state == KNOWN_OBSTACLE:
                 self.wall_turn = k + 1
                 continue
+            if dx and dy:
+                # 已知切角阻挡时直接跳过，避免无谓撞墙
+                s1 = self.known.get((nx, pos[1]))
+                s2 = self.known.get((pos[0], ny))
+                if (s1 == KNOWN_WALL or s1 == KNOWN_OBSTACLE
+                        or s2 == KNOWN_WALL or s2 == KNOWN_OBSTACLE):
+                    self.wall_turn = k + 1
+                    continue
             self.wall_turn = k
             if self._try_move(nx, ny):
                 self.facing = nd
