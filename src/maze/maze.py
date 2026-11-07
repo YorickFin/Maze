@@ -42,10 +42,11 @@ class Config:
     step_interval: float = 0.002
     max_steps: int = 500_000
     cost_right: float = 1.0        # 向右移动代价
-    cost_vertical: float = 2.0     # 向上/下移动代价
-    cost_left: float = 4.0         # 向左回退代价
+    cost_vertical: float = 3.0     # 向上/下移动代价
+    cost_left: float = 10.0        # 向左回退代价
     suspect_penalty: float = 20.0  # 穿过「疑似障碍」格的附加代价
     plan_expand_limit: int = 200_000  # 单次规划最大扩展格数
+    wall_follow: bool = True       # 是否启用「沿墙为主」模式
     cell_px: int = 2
 
 

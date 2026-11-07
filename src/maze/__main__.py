@@ -45,10 +45,11 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
         step_interval=float(solver_cfg.get("step_interval", 0.002)),
         max_steps=int(solver_cfg.get("max_steps", 500_000)),
         cost_right=float(solver_cfg.get("cost_right", 1.0)),
-        cost_vertical=float(solver_cfg.get("cost_vertical", 2.0)),
-        cost_left=float(solver_cfg.get("cost_left", 4.0)),
+        cost_vertical=float(solver_cfg.get("cost_vertical", 3.0)),
+        cost_left=float(solver_cfg.get("cost_left", 10.0)),
         suspect_penalty=float(solver_cfg.get("suspect_penalty", 20.0)),
         plan_expand_limit=int(solver_cfg.get("plan_expand_limit", 200_000)),
+        wall_follow=bool(solver_cfg.get("wall_follow", True)),
         cell_px=int(vis.get("cell_px", 2)),
     )
 
@@ -65,6 +66,7 @@ def main() -> None:
         cost_left=cfg.cost_left,
         suspect_penalty=cfg.suspect_penalty,
         plan_expand_limit=cfg.plan_expand_limit,
+        wall_follow=cfg.wall_follow,
     )
 
     # 简单预检查：起点是否被墙或障碍覆盖

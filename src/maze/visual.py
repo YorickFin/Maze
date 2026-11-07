@@ -264,7 +264,7 @@ async function tick() {
     mergeState(st);
     drawRight(st); drawMid(st); drawLeft(st);
     document.getElementById('stats').textContent =
-      '步数 ' + st.steps + ' | 受阻 ' + st.blocked + ' | 状态：' + st.status;
+      '步数 ' + st.steps + ' | 受阻 ' + st.blocked + ' | 策略：' + st.mode + ' | 状态：' + st.status;
     if (st.status !== '完成' && st.status !== '卡死') {
       await window.pywebview.api.advance();
     }
@@ -335,6 +335,7 @@ class Api:
             "pos": list(s.pos),
             "steps": s.step_count,
             "blocked": s.blocked_hits,
+            "mode": s.mode,
             "status": status,
             "newExplored": [_key(c) for c in s.new_explored],
             "newVisited": [_key(c) for c in s.new_visited],
