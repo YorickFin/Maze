@@ -103,6 +103,43 @@ class Solver:
         self._obs_pos: tuple[int, int] | None = None
         self._observe(full=True)  # 初始完整视野
 
+    @classmethod
+    def from_config(cls, maze: Maze, cfg) -> "Solver":
+        """按 Config 构造求解器（main 与重开共用）。"""
+        return cls(
+            maze,
+            view_size=cfg.view_size,
+            max_steps=cfg.max_steps,
+            cost_right=cfg.cost_right,
+            cost_vertical=cfg.cost_vertical,
+            cost_left=cfg.cost_left,
+            suspect_penalty=cfg.suspect_penalty,
+            plan_expand_limit=cfg.plan_expand_limit,
+            wall_follow=cfg.wall_follow,
+            cluster_enabled=cfg.cluster_enabled,
+            cluster_gain_weight=cfg.cluster_gain_weight,
+            cluster_right_weight=cfg.cluster_right_weight,
+            cluster_cost_weight=cfg.cluster_cost_weight,
+            cluster_min_size=cfg.cluster_min_size,
+            cluster_top_k=cfg.cluster_top_k,
+            cluster_gain_radius=cfg.cluster_gain_radius,
+            cluster_expand_limit=cfg.cluster_expand_limit,
+        )
+
+    def set_strategy(self, wall_follow: bool, cluster_enabled: bool) -> None:
+        """即时切换策略：沿墙 / 聚类 gain / 前沿规划。"""
+        self.wall_follow = wall_follow
+        self.cluster_enabled = cluster_enabled
+        self._clear_plan()
+        if wall_follow:
+            self.mode = MODE_WALL
+            self.facing = 0
+            self.wall_turn = 0
+            self.wall_failed = False
+            self.wall_states = {(self.pos, 0)}
+        else:
+            self.mode = MODE_PLAN
+
     # ---- 感知（初始全量，之后只观测新进入的一条视野边） ----
 
     def _observe(self, full: bool = False) -> None:

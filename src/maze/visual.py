@@ -13,8 +13,9 @@
 from __future__ import annotations
 
 import json
+import random
 
-from .maze import Config, Maze
+from .maze import Config, Maze, generate_maze
 from .solver import Solver
 
 _HTML_TEMPLATE = """<!DOCTYPE html>
@@ -28,6 +29,8 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   #topbar button { background: #2b2b2b; color: #ddd; border: 1px solid #444;
                    padding: 5px 12px; border-radius: 4px; cursor: pointer; font-size: 13px; }
   #topbar button:hover { background: #3a3a3a; }
+  #topbar select { background: #2b2b2b; color: #ddd; border: 1px solid #444;
+                   padding: 5px 8px; border-radius: 4px; font-size: 13px; }
   #topbar label { display: flex; align-items: center; gap: 6px; }
   #topbar input[type=range] { width: 140px; }
   #stats { margin-left: auto; color: #8f8; }
@@ -41,8 +44,14 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 <body>
 <div id="topbar">
   <button id="btn-pause">暂停</button>
+  <select id="strategy">
+    <option value="cluster">聚类 gain</option>
+    <option value="wall">沿墙</option>
+    <option value="frontier">前沿规划</option>
+  </select>
   <label>速度 <input id="speed" type="range" min="1" max="100" value="50"></label>
-  <span id="stats">步数 0 | 受阻 0 | 状态：探索中</span>
+  <button id="btn-restart">重开</button>
+  <span id="stats">种子 - | 步数 0 | 受阻 0 | 状态：探索中</span>
 </div>
 <div id="panels">
   <div class="panel"><h3>左 · 已探索合成图（黑=墙/未探索 白=通道 灰=推断障碍）</h3><div class="wrap"><canvas id="c-left"></canvas></div></div>
@@ -59,6 +68,7 @@ const C_START = '#0070ff';
 const C_END = '#ff2d2d';
 const C_POS = '#ffd400';
 const C_TRAIL = '#4a9eff';
+const STRATEGY_LABEL = {cluster: '聚类 gain', wall: '沿墙', frontier: '前沿规划'};
 
 let MAP = null;
 let rightBase = null;
@@ -67,6 +77,7 @@ let leftCtx = null;
 let bbox = null;                 // 左栏绘制范围 {minX,minY,maxX,maxY}
 let paused = false;
 let busy = false;
+let reloading = false;
 
 const explored = new Set();
 const visited = new Set();
@@ -257,14 +268,16 @@ function drawLeft(st) {
 
 async function tick() {
   requestAnimationFrame(tick);
-  if (!MAP || paused || busy) return;
+  if (!MAP || paused || busy || reloading) return;
   busy = true;
   try {
     const st = JSON.parse(await window.pywebview.api.get_state());
     mergeState(st);
     drawRight(st); drawMid(st); drawLeft(st);
     document.getElementById('stats').textContent =
-      '步数 ' + st.steps + ' | 受阻 ' + st.blocked + ' | 策略：' + st.mode + ' | 状态：' + st.status;
+      '种子 ' + st.seed + ' | 步数 ' + st.steps + ' | 受阻 ' + st.blocked +
+      ' | 策略：' + (STRATEGY_LABEL[st.strategy] || st.strategy) +
+      ' | 状态：' + st.status;
     if (st.status !== '完成' && st.status !== '卡死') {
       await window.pywebview.api.advance();
     }
@@ -273,9 +286,19 @@ async function tick() {
   }
 }
 
+function resetView() {
+  explored.clear();
+  visited.clear();
+  walls.clear();
+  obstacles.clear();
+  bbox = null;
+}
+
 async function boot() {
   MAP = JSON.parse(await window.pywebview.api.get_map());
   buildBase();
+  const strategy = await window.pywebview.api.get_strategy();
+  document.getElementById('strategy').value = strategy;
   tick();
 }
 
@@ -285,6 +308,24 @@ document.getElementById('btn-pause').onclick = function() {
 };
 document.getElementById('speed').oninput = function() {
   window.pywebview.api.set_speed(parseInt(this.value));
+};
+document.getElementById('strategy').onchange = function() {
+  window.pywebview.api.set_strategy(this.value);
+};
+document.getElementById('btn-restart').onclick = async function() {
+  this.disabled = true;
+  reloading = true;
+  try {
+    await window.pywebview.api.restart();
+    resetView();
+    MAP = JSON.parse(await window.pywebview.api.get_map());
+    buildBase();
+    paused = false;
+    document.getElementById('btn-pause').textContent = '暂停';
+  } finally {
+    reloading = false;
+    this.disabled = false;
+  }
 };
 
 window.addEventListener('pywebviewready', boot);
@@ -311,6 +352,40 @@ class Api:
         self.solver = solver
         self.cfg = cfg
         self.speed = 50  # 1-100
+        self.strategy = self._strategy_name(cfg)
+
+    @staticmethod
+    def _strategy_name(cfg: Config) -> str:
+        if cfg.wall_follow:
+            return "wall"
+        if cfg.cluster_enabled:
+            return "cluster"
+        return "frontier"
+
+    @staticmethod
+    def _strategy_flags(name: str) -> tuple[bool, bool]:
+        return {"cluster": (False, True),
+                "wall": (True, False),
+                "frontier": (False, False)}[name]
+
+    def get_strategy(self) -> str:
+        return self.strategy
+
+    def set_strategy(self, name: str) -> None:
+        if name not in ("cluster", "wall", "frontier"):
+            return
+        self.strategy = name
+        self.solver.set_strategy(*self._strategy_flags(name))
+
+    def restart(self) -> str:
+        """换随机种子重新生成迷宫，并重建求解器。"""
+        self.cfg.seed = random.randrange(1, 2**31)
+        maze = generate_maze(self.cfg)
+        solver = Solver.from_config(maze, self.cfg)
+        solver.set_strategy(*self._strategy_flags(self.strategy))
+        self.maze = maze
+        self.solver = solver
+        return json.dumps({"seed": self.cfg.seed})
 
     def get_map(self) -> str:
         """全图只在启动时返回一次，之后由前端缓存。"""
@@ -336,6 +411,8 @@ class Api:
             "steps": s.step_count,
             "blocked": s.blocked_hits,
             "mode": s.mode,
+            "seed": self.cfg.seed,
+            "strategy": self.strategy,
             "status": status,
             "newExplored": [_key(c) for c in s.new_explored],
             "newVisited": [_key(c) for c in s.new_visited],

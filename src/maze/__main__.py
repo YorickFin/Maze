@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 import sys
 import tomllib
 from pathlib import Path
@@ -64,33 +65,18 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
 
 def main() -> None:
     cfg = load_config()
+    if cfg.seed < 0:
+        cfg.seed = random.randrange(1, 2**31)
     maze = generate_maze(cfg)
-    solver = Solver(
-        maze,
-        view_size=cfg.view_size,
-        max_steps=cfg.max_steps,
-        cost_right=cfg.cost_right,
-        cost_vertical=cfg.cost_vertical,
-        cost_left=cfg.cost_left,
-        suspect_penalty=cfg.suspect_penalty,
-        plan_expand_limit=cfg.plan_expand_limit,
-        wall_follow=cfg.wall_follow,
-        cluster_enabled=cfg.cluster_enabled,
-        cluster_gain_weight=cfg.cluster_gain_weight,
-        cluster_right_weight=cfg.cluster_right_weight,
-        cluster_cost_weight=cfg.cluster_cost_weight,
-        cluster_min_size=cfg.cluster_min_size,
-        cluster_top_k=cfg.cluster_top_k,
-        cluster_gain_radius=cfg.cluster_gain_radius,
-        cluster_expand_limit=cfg.cluster_expand_limit,
-    )
+    solver = Solver.from_config(maze, cfg)
 
     # 简单预检查：起点是否被墙或障碍覆盖
     if maze.is_blocked(*maze.start):
         print(f"警告：起点 {maze.start} 不可通行，跳过。")
         sys.exit(1)
 
-    print(f"迷宫 {maze.width}x{maze.height}，墙格 {maze.count_walls()}，"
+    print(f"迷宫 {maze.width}x{maze.height}，种子 {cfg.seed}，"
+          f"墙格 {maze.count_walls()}，"
           f"障碍格 {maze.count_obstacles()}，通道格 {maze.count_empty()}，"
           f"起点 {maze.start}，终点 {maze.end}，视距 {cfg.view_size}x{cfg.view_size}")
 
