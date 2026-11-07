@@ -2,18 +2,40 @@
 
 from __future__ import annotations
 
+import functools
+import os
 import random
 import sys
+import threading
 import tomllib
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import webview
 
 from .maze import Config, generate_maze
 from .solver import Solver
-from .visual import Api, build_html
+from .visual import Api
 
-CONFIG_PATH = Path(__file__).resolve().parent.parent.parent / "config.toml"
+ROOT = Path(__file__).resolve().parent.parent.parent
+CONFIG_PATH = ROOT / "config.toml"
+FRONTEND_DIST = ROOT / "frontend" / "dist"
+
+
+class _QuietHandler(SimpleHTTPRequestHandler):
+    """静态文件服务，不打印每条请求日志。"""
+
+    def log_message(self, fmt: str, *args) -> None:
+        pass
+
+
+def _serve_frontend() -> str:
+    """在本地随机端口托管 frontend/dist，返回 index.html 的 URL。"""
+    handler = functools.partial(_QuietHandler, directory=str(FRONTEND_DIST))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    port = server.server_address[1]
+    return f"http://127.0.0.1:{port}/index.html"
 
 
 def load_config(path: Path = CONFIG_PATH) -> Config:
@@ -81,14 +103,21 @@ def main() -> None:
           f"起点 {maze.start}，终点 {maze.end}，视距 {cfg.view_size}x{cfg.view_size}")
 
     api = Api(maze, solver, cfg)
-    html = build_html(cfg.view_size)
+    url = os.environ.get("MAZE_FRONTEND_URL")
+    if not url:
+        index = FRONTEND_DIST / "index.html"
+        if not index.exists():
+            print(f"未找到前端构建产物：{index}")
+            print("请先运行：cd frontend && pnpm build")
+            sys.exit(1)
+        url = _serve_frontend()
 
     window = webview.create_window(
-        "迷宫 A* 破解演示",
-        html=html,
+        "迷宫破解演示",
+        url=url,
         js_api=api,
-        width=1200,
-        height=700,
+        width=1280,
+        height=800,
     )
     webview.start()
 
