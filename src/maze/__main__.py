@@ -22,6 +22,7 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
 
     maze_cfg = data.get("maze", {})
     obs = data.get("obstacle", {})
+    corridor = data.get("corridor", {})
     solver_cfg = data.get("solver", {})
     vis = data.get("visual", {})
 
@@ -31,6 +32,9 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
         obstacle_count=int(obs.get("count", 3000)),
         obstacle_ratio=float(obs.get("ratio", 0.15)),
         seed=int(obs.get("seed", -1)),
+        corridor_min=int(corridor.get("min", 1)),
+        corridor_max=int(corridor.get("max", 5)),
+        corridor_extra_prob=float(corridor.get("extra_prob", 0.4)),
         view_size=int(solver_cfg.get("view_size", 10)),
         step_interval=float(solver_cfg.get("step_interval", 0.002)),
         max_steps=int(solver_cfg.get("max_steps", 500_000)),

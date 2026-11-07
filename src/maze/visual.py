@@ -43,7 +43,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   <span id="stats">步数 0 | 受阻 0 | 状态：探索中</span>
 </div>
 <div id="panels">
-  <div class="panel"><h3>左 · 已探索合成图</h3><div class="wrap"><canvas id="c-left"></canvas></div></div>
+  <div class="panel"><h3>左 · 已探索合成图（含 10×10 视野扫过区域）</h3><div class="wrap"><canvas id="c-left"></canvas></div></div>
   <div class="panel"><h3>中 · 实时视野 (VIEWSIZE×VIEWSIZE, 障碍不可见)</h3><div class="wrap"><canvas id="c-mid"></canvas></div></div>
   <div class="panel"><h3>右 · 完整地图 (含障碍)</h3><div class="wrap"><canvas id="c-right"></canvas></div></div>
 </div>
@@ -129,9 +129,11 @@ function drawLeft(st) {
   const W = st.width, H = st.height;
   let minX = W, minY = H, maxX = 0, maxY = 0;
   const inr = (x,y) => x>=minX && x<=maxX && y>=minY && y<=maxY;
-  for (const v of st.visited) {
-    if (v[0]<minX) minX=v[0]; if (v[0]>maxX) maxX=v[0];
-    if (v[1]<minY) minY=v[1]; if (v[1]>maxY) maxY=v[1];
+  // 探索范围以「视野扫过」explored 为准
+  for (const k of st.explored) {
+    const p = k.split(',').map(Number);
+    if (p[0]<minX) minX=p[0]; if (p[0]>maxX) maxX=p[0];
+    if (p[1]<minY) minY=p[1]; if (p[1]>maxY) maxY=p[1];
   }
   for (const k of st.knownWalls) {
     const p = k.split(',').map(Number);
@@ -147,10 +149,18 @@ function drawLeft(st) {
   const ctx = cLeft.getContext('2d');
   ctx.fillStyle = '#0a0a0a';
   ctx.fillRect(0, 0, cLeft.width, cLeft.height);
+  // 已感知区域（视野扫过）：淡蓝
+  ctx.fillStyle = 'rgba(60,120,200,0.35)';
+  for (const k of st.explored) {
+    const p = k.split(',').map(Number);
+    ctx.fillRect((p[0]-minX)*leftCell, (p[1]-minY)*leftCell, leftCell, leftCell);
+  }
+  // 实际走过的路径：亮蓝
+  ctx.fillStyle = 'rgba(80,160,255,0.55)';
   for (const v of st.visited) {
-    ctx.fillStyle = 'rgba(80,160,255,0.45)';
     ctx.fillRect((v[0]-minX)*leftCell, (v[1]-minY)*leftCell, leftCell, leftCell);
   }
+  // 推断障碍：红
   for (const k of st.knownWalls) {
     const p = k.split(',').map(Number);
     ctx.fillStyle = 'rgba(220,60,60,0.6)';
@@ -168,6 +178,7 @@ async function tick() {
     // Python 返回数组，转成 Set 供 includes/has 使用
     st.visitedSet = new Set(st.visitedSet || []);
     st.knownWalls = new Set(st.knownWalls || []);
+    st.exploredSet = new Set(st.explored || []);
     drawRight(st); drawMid(st); drawLeft(st);
     document.getElementById('stats').textContent =
       '步数 ' + st.steps + ' | 受阻 ' + st.blocked + ' | 状态：' + st.status;
@@ -219,6 +230,7 @@ class Api:
             "pos": list(s.pos),
             "visited": [list(v) for v in s.visited],
             "visitedSet": [f"{v[0]},{v[1]}" for v in s.visited],
+            "explored": [f"{c[0]},{c[1]}" for c in s.explored],
             "knownWalls": [f"{c[0]},{c[1]}" for c in s.known if s.known[c] == KNOWN_WALL],
             "steps": s.step_count,
             "blocked": s.blocked_hits,

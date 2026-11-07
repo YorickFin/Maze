@@ -36,14 +36,31 @@ class Solver:
         self.known: dict[tuple[int, int], int] = {}
         self.pos = maze.start
         self.visited: set[tuple[int, int]] = {maze.start}  # 实际到达过的格
+        self.explored: set[tuple[int, int]] = set()  # 视野扫过的格（已感知）
         self.step_count = 0
         self.done = False
         self.blocked_hits = 0  # 受阻次数
         self.known[maze.start] = KNOWN_EMPTY
+        self._observe()  # 初始视野
 
         # 当前待走路径（格序列，含当前格在首）
         self.path: list[tuple[int, int]] = [maze.start]
         self.path_idx = 0
+
+    def _observe(self) -> None:
+        """把当前位置 view_size×view_size 视野内的格子加入 explored。
+
+        注意：视野内障碍「不可见」（用户要求），所以只记录该格被感知到
+        （作为「已扫过区域」），不读取真实墙信息——障碍仍需靠移动受阻推断。
+        """
+        half = self.view_size // 2
+        x0 = self.pos[0] - half
+        y0 = self.pos[1] - half
+        for dy in range(self.view_size):
+            for dx in range(self.view_size):
+                gx, gy = x0 + dx, y0 + dy
+                if self.maze.in_bounds(gx, gy):
+                    self.explored.add((gx, gy))
 
     # ---- 感知与移动 ----
 
@@ -56,23 +73,25 @@ class Solver:
         self.known[(nx, ny)] = KNOWN_EMPTY
         self.pos = (nx, ny)
         self.visited.add((nx, ny))
+        self._observe()  # 移动后更新视野感知
         return True
 
     # ---- A* 寻路（朝右边界）----
 
-    def _astar_right(self, max_expand: int = 40000, window_w: int = 200) -> list[tuple[int, int]]:
+    def _astar_right(self, max_expand: int = 60000, window_w: int = 400,
+                     window_back: int = 300) -> list[tuple[int, int]]:
         """在「已知 EMPTY + 未知」图上朝右边界做 A*，限制在 x 窗口内。
 
-        窗口 x ∈ [pos.x, pos.x + window_w]，避免回溯整张地图。
-        未知格允许通行但代价略高；已知 WALL 禁止。返回路径（含当前格），
-        不可达或扩展超过 max_expand 节点时返回空列表。
+        窗口 x ∈ [pos.x - window_back, pos.x + window_w]，允许向后回退绕行
+        （房间式迷宫需要绕行找门）。未知格允许通行但代价略高；已知 WALL
+        禁止。返回路径（含当前格），不可达或扩展超限返回空列表。
         """
         target_x = self.maze.width - 1
         start = self.pos
         if start[0] == target_x:
             return [start]
 
-        x_min = start[0]
+        x_min = max(0, start[0] - window_back)
         x_max = min(target_x, start[0] + window_w)
 
         open_heap: list[tuple[float, int, tuple[int, int]]] = []
@@ -112,7 +131,7 @@ class Solver:
                     continue
                 if not self.maze.in_bounds(nx, ny):
                     continue
-                # 仅允许在 x 窗口内（不回头）
+                # 限制在 x 窗口内（允许向后绕行）
                 if nx < x_min or nx > x_max:
                     continue
                 if self.known.get(nb) == KNOWN_WALL:
