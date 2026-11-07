@@ -121,6 +121,8 @@ class Solver:
         self.new_obstacles: list[tuple[int, int]] = []
 
         self.known[maze.start] = KNOWN_EMPTY
+        # 与起点 4-连通的已知可通行格；用于 O(1) 判断终点是否已可直达
+        self.reach: set[tuple[int, int]] = {maze.start}
         self.frontier: set[tuple[int, int]] = set()  # 已知可通行且邻接未观测区域的格
         self._obs_pos: tuple[int, int] | None = None
         self._observe(full=True)  # 初始完整视野
@@ -236,6 +238,7 @@ class Solver:
                 self.new_walls.append(cell)
             elif v == EMPTY:
                 self.known[cell] = KNOWN_EMPTY
+                self._grow_reach(cell)
         self._obs_pos = self.pos
 
         # 增量维护 frontier：只检查本次新观测格及其八邻
@@ -265,6 +268,27 @@ class Solver:
             self.new_obstacles.append(cell)
         self.blocked_hits += 1
 
+    def _grow_reach(self, seed: tuple[int, int]) -> None:
+        """新确认可通行的格若接上起点连通集，就增量并入（4-连通洪泛）。
+
+        只做一次均摊 O(1) 的邻接检查；真正连通时顺带把整片已知区域并入，
+        因此无需反复对全图做可达性搜索。
+        """
+        if seed in self.reach or self.known.get(seed) != KNOWN_EMPTY:
+            return
+        x, y = seed
+        if not any((x + dx, y + dy) in self.reach for dx, dy in DIRS):
+            return
+        stack = [seed]
+        self.reach.add(seed)
+        while stack:
+            cx, cy = stack.pop()
+            for dx, dy in DIRS:
+                nb = (cx + dx, cy + dy)
+                if nb not in self.reach and self.known.get(nb) == KNOWN_EMPTY:
+                    self.reach.add(nb)
+                    stack.append(nb)
+
     def _try_move(self, nx: int, ny: int) -> bool:
         """尝试移动一格（允许对角，但禁止切角）。受阻时标记并返回 False。"""
         px, py = self.pos
@@ -282,6 +306,7 @@ class Solver:
                     return False
         cell = (nx, ny)
         self.known[cell] = KNOWN_EMPTY
+        self._grow_reach(cell)
         self.pos = cell
         if cell not in self._visited_set:
             self._visited_set.add(cell)
@@ -321,9 +346,14 @@ class Solver:
         return None
 
     def _plan_to_goal(self) -> bool:
-        """看到红点后，直接朝它规划（Dijkstra，方向代价相同）。"""
+        """看到红点且已与起点连通时，直接朝它规划（Dijkstra，方向代价相同）。
+
+        终点只是「看到了」但尚未连通时立即返回：避免每次重规划都对整张
+        已知地图做一次注定失败的搜索（大视野下会造成明显卡顿）。
+        """
         goal = self.goal
-        if goal is None or self.known.get(goal) != KNOWN_EMPTY:
+        if (goal is None or self.known.get(goal) != KNOWN_EMPTY
+                or goal not in self.reach):
             return False
         start = self.pos
         if start == goal:
@@ -361,21 +391,14 @@ class Solver:
                 if not self.maze.in_bounds(nx, ny):
                     continue
                 nb = (nx, ny)
-                state = self.known.get(nb)
-                if state == KNOWN_WALL or state == KNOWN_OBSTACLE:
+                # 直达终点只走已确认可通行的格，避开灰色障碍带来的反复试错
+                if self.known.get(nb) != KNOWN_EMPTY:
                     continue
-                if state is None:
-                    if dx and dy:
-                        continue  # 对角不穿未知格
-                    if nb not in self.explored:
-                        continue
-                    step_cost = self._direction_cost(dx, dy) + self.suspect_penalty
-                else:
-                    if dx and dy:
-                        if (self.known.get((nx, cy)) != KNOWN_EMPTY
-                                or self.known.get((cx, ny)) != KNOWN_EMPTY):
-                            continue  # 禁止切角
-                    step_cost = self._direction_cost(dx, dy)
+                if dx and dy:
+                    if (self.known.get((nx, cy)) != KNOWN_EMPTY
+                            or self.known.get((cx, ny)) != KNOWN_EMPTY):
+                        continue  # 禁止切角
+                step_cost = self._direction_cost(dx, dy)
                 nd = d + step_cost
                 if nd < g_score.get(nb, float("inf")):
                     g_score[nb] = nd
