@@ -50,6 +50,12 @@ class Api:
         self.strategy = name
         self.solver.set_strategy(*self._strategy_flags(name))
 
+    def set_view_size(self, value: int) -> None:
+        """运行时修改视野边长（10~100）。"""
+        value = max(10, min(100, int(value)))
+        self.cfg.view_size = value
+        self.solver.set_view_size(value)
+
     def restart(self) -> str:
         """换随机种子重新生成迷宫，并重建求解器。"""
         self.cfg.seed = random.randrange(1, 2**31)
@@ -87,6 +93,7 @@ class Api:
             "mode": s.mode,
             "seed": self.cfg.seed,
             "strategy": self.strategy,
+            "view_size": self.cfg.view_size,
             "status": status,
             "newExplored": [_key(c) for c in s.new_explored],
             "newVisited": [_key(c) for c in s.new_visited],

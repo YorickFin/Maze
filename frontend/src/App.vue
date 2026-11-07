@@ -19,6 +19,7 @@ interface MazeState {
   mode: string
   seed: number
   strategy: string
+  view_size?: number
   status: string
   newExplored: string[]
   newVisited: string[]
@@ -46,6 +47,7 @@ const cLeft = ref<HTMLCanvasElement | null>(null)
 
 const strategy = ref('cluster')
 const speed = ref(50)
+const viewSize = ref(25)
 const paused = ref(false)
 const reloading = ref(false)
 const stats = reactive({
@@ -201,7 +203,7 @@ function drawRight(st: MazeState) {
 function drawMid(st: MazeState) {
   const el = cMid.value
   if (!el || !MAP) return
-  const vs = MAP.view_size ?? 25
+  const vs = st.view_size ?? MAP.view_size ?? 25
   const half = Math.floor(vs / 2)
   const px = st.pos[0]
   const py = st.pos[1]
@@ -321,8 +323,10 @@ function resetView() {
 async function boot() {
   const api = getApi()
   if (!api) return
-  MAP = JSON.parse(await api.get_map())
+  const data: MazeMap = JSON.parse(await api.get_map())
+  MAP = data
   strategy.value = await api.get_strategy()
+  viewSize.value = data.view_size ?? 25
   buildBase()
   tick()
 }
@@ -333,6 +337,10 @@ function togglePause() {
 
 function onSpeed() {
   getApi()?.set_speed(speed.value)
+}
+
+function onViewSize() {
+  getApi()?.set_view_size(viewSize.value)
 }
 
 function onStrategy() {
@@ -391,6 +399,10 @@ onUnmounted(() => {
         <label class="field slider">
           <span>速度</span>
           <input v-model.number="speed" type="range" min="1" max="100" @input="onSpeed" />
+        </label>
+        <label class="field slider">
+          <span>视野 {{ viewSize }}</span>
+          <input v-model.number="viewSize" type="range" min="10" max="100" @input="onViewSize" />
         </label>
         <button class="primary" :disabled="reloading" @click="restart">重开</button>
       </div>

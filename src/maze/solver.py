@@ -140,6 +140,15 @@ class Solver:
         else:
             self.mode = MODE_PLAN
 
+    def set_view_size(self, value: int) -> None:
+        """即时修改视野边长；重置观测锚点并按新视野做一次完整观测。"""
+        value = max(1, int(value))
+        if value == self.view_size:
+            return
+        self.view_size = value
+        self._obs_pos = None
+        self._observe(full=True)
+
     # ---- 感知（初始全量，之后只观测新进入的一条视野边） ----
 
     def _observe(self, full: bool = False) -> None:
