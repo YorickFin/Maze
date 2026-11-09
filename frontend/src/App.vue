@@ -32,6 +32,7 @@ interface MazeState {
 const CELL = 16
 const C_WALL = '#000000'
 const C_EMPTY = '#ffffff'
+const C_UNKNOWN = '#808080'
 const C_OBS = '#808080'
 const C_START = '#0070ff'
 const C_END = '#ff2d2d'
@@ -155,11 +156,12 @@ function buildBase() {
     bctx.stroke()
   }
 
+  // 左栏底图：未探索用深灰，与「已知墙」的纯黑区分开
   leftBase = document.createElement('canvas')
   leftBase.width = W
   leftBase.height = H
   leftCtx = leftBase.getContext('2d')!
-  leftCtx.fillStyle = C_WALL
+  leftCtx.fillStyle = C_UNKNOWN
   leftCtx.fillRect(0, 0, W, H)
 }
 
@@ -185,7 +187,8 @@ function mergeState(st: MazeState) {
     for (const k of st.newObstacles) {
       obstacles.add(k)
       expandBBox(k)
-      cellFill(leftCtx, k, C_OBS)
+      // 已探索图里推断障碍与墙同色（黑）
+      cellFill(leftCtx, k, C_WALL)
     }
   }
   if (st.newVisited.length) {
@@ -290,7 +293,8 @@ function drawMid(st: MazeState) {
 function drawLeft(st: MazeState) {
   const el = cLeft.value
   if (!el || !MAP || !leftBase || !bbox) return
-  const pad = 8
+  // 显示窗口严格等于已探索包络：不额外外扩，避免把包络外的未探索区画成深灰边框
+  const pad = 0
   const minX = Math.max(0, bbox.minX - pad)
   const minY = Math.max(0, bbox.minY - pad)
   const maxX = Math.min(MAP.width - 1, bbox.maxX + pad)
@@ -491,7 +495,7 @@ onUnmounted(() => {
       <section class="card">
         <div class="card-head">
           <h2>已探索</h2>
-          <span class="hint">黑=墙/未知 · 白=通道 · 灰=推断障碍</span>
+          <span class="hint">黑=墙/推断障碍 · 白=通道 · 灰=未知</span>
         </div>
         <div class="canvas-wrap"><canvas ref="cLeft" /></div>
       </section>

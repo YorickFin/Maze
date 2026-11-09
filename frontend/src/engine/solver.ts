@@ -251,15 +251,20 @@ export class Solver {
       const ox = this.xOf(this.obsPos)
       const oy = this.yOf(this.obsPos)
       if (px === ox && py === oy) return
+      // 视野范围 [pos - half, pos - half + viewSize - 1]；偶数视野时右/下边界不是 pos + half
+      const left = px - half
+      const right = px - half + this.viewSize - 1
+      const top = py - half
+      const bottom = py - half + this.viewSize - 1
       if (px !== ox) {
-        const x = px + (px > ox ? half : -half)
-        for (let y = py - half; y <= py + half; y++) {
+        const x = px > ox ? right : left
+        for (let y = top; y <= bottom; y++) {
           if (x >= 0 && x < w && y >= 0 && y < h) cells.push(this.idx(x, y))
         }
       }
       if (py !== oy) {
-        const y = py + (py > oy ? half : -half)
-        for (let x = px - half; x <= px + half; x++) {
+        const y = py > oy ? bottom : top
+        for (let x = left; x <= right; x++) {
           if (x >= 0 && x < w && y >= 0 && y < h) cells.push(this.idx(x, y))
         }
       }

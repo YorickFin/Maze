@@ -203,6 +203,10 @@ class Solver:
 
         灰色障碍对传感器不可见，保持未知；只有撞上后才会被确认。
         非全量模式下只扫描本次移动新进入的那一条视野边（25 格）。
+
+        视野范围是 [pos - half, pos - half + view_size - 1]，奇数视野时右/下边界
+        恰好是 pos + half，偶数视野时是 pos + half - 1，必须按后者统一计算，
+        否则偶数视野会漏掉最右一列 / 最下一行，留下整条未探索缝隙。
         """
         half = self.view_size // 2
         n0 = len(self.new_explored)
@@ -217,13 +221,17 @@ class Solver:
             px, py = self.pos
             if px == ox and py == oy:
                 return
+            left = px - half
+            right = px - half + self.view_size - 1
+            top = py - half
+            bottom = py - half + self.view_size - 1
             cells = []
             if px != ox:
-                x = px + (half if px > ox else -half)
-                cells.extend((x, y) for y in range(py - half, py + half + 1))
+                x = right if px > ox else left
+                cells.extend((x, y) for y in range(top, bottom + 1))
             if py != oy:
-                y = py + (half if py > oy else -half)
-                cells.extend((x, y) for x in range(px - half, px + half + 1))
+                y = bottom if py > oy else top
+                cells.extend((x, y) for x in range(left, right + 1))
 
         for (gx, gy) in cells:
             if not self.maze.in_bounds(gx, gy):
