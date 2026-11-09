@@ -30,12 +30,15 @@ class _QuietHandler(SimpleHTTPRequestHandler):
 
 
 def _serve_frontend() -> str:
-    """在本地随机端口托管 frontend/dist，返回 index.html 的 URL。"""
+    """在本地随机端口托管 frontend/dist，返回 index.html 的 URL。
+
+    带上 `host=pywebview`，让前端跳过浏览器版引擎、改用 pywebview 注入的 Python Api。
+    """
     handler = functools.partial(_QuietHandler, directory=str(FRONTEND_DIST))
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     port = server.server_address[1]
-    return f"http://127.0.0.1:{port}/index.html"
+    return f"http://127.0.0.1:{port}/index.html?host=pywebview"
 
 
 def load_config(path: Path = CONFIG_PATH) -> Config:

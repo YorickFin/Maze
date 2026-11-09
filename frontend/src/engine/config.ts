@@ -1,0 +1,70 @@
+/** 浏览器版默认配置，字段与根目录 config.toml 的 [generator]/[obstacle]/[solver] 对齐。 */
+export interface MazeConfig {
+  width: number
+  height: number
+  seed: number
+  nodeSpacing: number
+  nodeJitter: number
+  corridorRadiusMin: number
+  corridorRadiusMax: number
+  chamberRadiusMin: number
+  chamberRadiusMax: number
+  chamberProb: number
+  loopProb: number
+  obstacleBlobs: number
+  obstacleRadiusMin: number
+  obstacleRadiusMax: number
+  viewSize: number
+  costRight: number
+  costVertical: number
+  costLeft: number
+  suspectPenalty: number
+  planExpandLimit: number
+  wallFollow: boolean
+  clusterEnabled: boolean
+  clusterGainWeight: number
+  clusterRightWeight: number
+  clusterCostWeight: number
+  clusterMinSize: number
+  clusterTopK: number
+  clusterGainRadius: number
+  clusterExpandLimit: number
+  allowDiagonal: boolean
+  diagonalFactor: number
+  maxSteps: number
+}
+
+export const DEFAULT_CONFIG: MazeConfig = {
+  width: 1000,
+  height: 1000,
+  seed: -1,
+  nodeSpacing: 100,
+  nodeJitter: 25,
+  corridorRadiusMin: 13,
+  corridorRadiusMax: 20,
+  chamberRadiusMin: 22,
+  chamberRadiusMax: 40,
+  chamberProb: 0.55,
+  loopProb: 0.12,
+  obstacleBlobs: 12,
+  obstacleRadiusMin: 12,
+  obstacleRadiusMax: 26,
+  viewSize: 25,
+  costRight: 1.0,
+  costVertical: 3.0,
+  costLeft: 10.0,
+  suspectPenalty: 20.0,
+  planExpandLimit: 200000,
+  wallFollow: false,
+  clusterEnabled: true,
+  clusterGainWeight: 2.0,
+  clusterRightWeight: 0.0,
+  clusterCostWeight: 1.0,
+  clusterMinSize: 5,
+  clusterTopK: 4,
+  clusterGainRadius: 10,
+  clusterExpandLimit: 10000,
+  allowDiagonal: true,
+  diagonalFactor: 1.414,
+  maxSteps: 500000,
+}

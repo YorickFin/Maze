@@ -8,6 +8,15 @@
 
 ---
 
+## 在线演示
+
+浏览器版（纯前端、无需后端）：<https://yorickfin.github.io/Maze/>
+
+页面由 GitHub Pages 托管。桌面版运行 Python 求解器；浏览器版运行同算法的 TypeScript 移植
+（`frontend/src/engine/`），两者共用同一套 Vue 界面，通过 `window.pywebview.api` 兼容层切换。
+
+---
+
 ## 功能特性
 
 - **有机迷宫生成**：抖动节点阵列 + Kruskal 生成树保证连通，圆盘笔刷填充宽窄不一的通道与膨大腔室，按概率加入环路；通道内投放灰色障碍斑块，并沿最短路径保留保护带，避免切断主通路。
@@ -53,8 +62,8 @@ Push-Location frontend
 pnpm dev
 Pop-Location
 
-# 另开一个终端
-$env:MAZE_FRONTEND_URL = "http://localhost:5173"
+# 另开一个终端（host=pywebview 让前端使用 Python 后端而不是浏览器引擎）
+$env:MAZE_FRONTEND_URL = "http://localhost:5173/?host=pywebview"
 uv run maze
 ```
 
@@ -124,9 +133,11 @@ uv run maze
 │  ├─ visual.py        # pywebview 暴露的 JS API
 │  └─ __main__.py      # 入口：读配置、生成迷宫、托管前端、打开窗口
 ├─ frontend/           # Vue 3 + Vite 前端（三栏界面与控制栏）
+│  └─ src/engine/      # 浏览器版引擎：TS 移植的迷宫生成与三种探索策略
 ├─ docs/               # 三种探索算法总结
-├─ config.toml         # 运行配置
-└─ pyproject.toml      # Python 项目与依赖（uv）
+├─ config.toml         # 运行配置（仅 Python 桌面版读取）
+├─ pyproject.toml      # Python 项目与依赖（uv）
+└─ .github/workflows/  # GitHub Pages 自动构建与发布
 ```
 
 ---
@@ -137,8 +148,10 @@ uv run maze
 - 破解方不读地图尺寸与终点坐标，只看视野；红点进入视野后才获得终点。
 - 八向沿墙允许擦单侧墙角（规划模式仍严格禁止切角），两者规则有意分离。
 - 完整地图上的最短路径是 4 连通 BFS 结果，不是八向最短路径。
-- `frontend/dist` 不入库，每次前端改动后需要重新 `pnpm build`。
-- 本项目是本地桌面演示（pywebview + 本地静态服务），没有服务端部署形态。
+- 浏览器版是 TypeScript 重写实现，与 Python 版各自维护；两边伪随机序列不同，同一 `seed` 生成的迷宫也不同。
+- 浏览器版使用前端内置默认参数（1000×1000、视野 25 等），不读取 `config.toml`。
+- `frontend/dist` 不入库，每次前端改动后需要重新 `pnpm build`（GitHub Pages 由 Actions 自动构建）。
+- 本项目没有服务端形态：桌面版是本地 pywebview 窗口，浏览器版是纯静态托管（GitHub Pages），全部计算在客户端完成。
 
 ---
 
