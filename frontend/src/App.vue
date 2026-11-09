@@ -9,6 +9,7 @@ interface MazeMap {
   grid: number[][]
   start: Vec
   end: Vec
+  path?: Vec[]
   view_size?: number
 }
 
@@ -36,6 +37,7 @@ const C_START = '#0070ff'
 const C_END = '#ff2d2d'
 const C_POS = '#ffd400'
 const C_TRAIL = '#4a9eff'
+const C_PATH = '#a855f7'
 const STRATEGY_LABEL: Record<string, string> = {
   cluster: '聚类 gain',
   wall: '沿墙',
@@ -51,6 +53,7 @@ const speed = ref(50)
 const viewSize = ref(25)
 const moveMode = ref('8')
 const paused = ref(false)
+const started = ref(false)
 const reloading = ref(false)
 const stats = reactive({
   seed: '-',
@@ -137,6 +140,20 @@ function buildBase() {
     }
   }
   bctx.putImageData(img, 0, 0)
+
+  // 完整地图上的最短路径（紫线，仅换图/首次启动时随底图重绘）
+  const path = MAP.path ?? []
+  if (path.length > 1) {
+    bctx.strokeStyle = C_PATH
+    bctx.lineWidth = 3
+    bctx.lineJoin = 'round'
+    bctx.beginPath()
+    bctx.moveTo(path[0][0] + 0.5, path[0][1] + 0.5)
+    for (let i = 1; i < path.length; i++) {
+      bctx.lineTo(path[i][0] + 0.5, path[i][1] + 0.5)
+    }
+    bctx.stroke()
+  }
 
   leftBase = document.createElement('canvas')
   leftBase.width = W
@@ -322,7 +339,7 @@ async function tick() {
     stats.blocked = st.blocked
     stats.strategy = st.strategy
     stats.status = st.status
-    if (st.status !== '完成' && st.status !== '卡死') {
+    if (started.value && st.status !== '完成' && st.status !== '卡死') {
       await api.advance()
     }
   } finally {
@@ -372,9 +389,28 @@ function onStrategy() {
   getApi()?.set_strategy(strategy.value)
 }
 
-async function restart() {
+async function start() {
   const api = getApi()
-  if (!api) return
+  if (!api || reloading.value) return
+  reloading.value = true
+  try {
+    // 不换图：回到起点，重置已探索与实时视野后重新跑
+    await api.reset()
+    resetView()
+    if (MAP) buildBase()
+    stats.steps = 0
+    stats.blocked = 0
+    stats.status = '探索中'
+    paused.value = false
+    started.value = true
+  } finally {
+    reloading.value = false
+  }
+}
+
+async function newMap() {
+  const api = getApi()
+  if (!api || reloading.value) return
   reloading.value = true
   try {
     await api.restart()
@@ -382,6 +418,7 @@ async function restart() {
     MAP = JSON.parse(await api.get_map())
     buildBase()
     paused.value = false
+    started.value = false // 换图后等点击「开始」
   } finally {
     reloading.value = false
   }
@@ -412,7 +449,8 @@ onUnmounted(() => {
       </div>
 
       <div class="controls">
-        <button class="ghost" @click="togglePause">{{ paused ? '继续' : '暂停' }}</button>
+        <button class="primary" :disabled="reloading" @click="start">开始</button>
+        <button class="ghost" :disabled="!started" @click="togglePause">{{ paused ? '继续' : '暂停' }}</button>
         <label class="field">
           <span>策略</span>
           <select v-model="strategy" @change="onStrategy">
@@ -436,7 +474,7 @@ onUnmounted(() => {
           <span>视野 {{ viewSize }}</span>
           <input v-model.number="viewSize" type="range" min="10" max="100" @input="onViewSize" />
         </label>
-        <button class="primary" :disabled="reloading" @click="restart">重开</button>
+        <button class="ghost" :disabled="reloading" @click="newMap">换图</button>
       </div>
 
       <div class="status">
@@ -467,7 +505,7 @@ onUnmounted(() => {
       <section class="card">
         <div class="card-head">
           <h2>完整地图</h2>
-          <span class="hint">黑=墙 · 白=可通行 · 灰=障碍</span>
+          <span class="hint">黑=墙 · 白=可通行 · 灰=障碍 · 紫=最短路径</span>
         </div>
         <div class="canvas-wrap"><canvas ref="cRight" /></div>
       </section>

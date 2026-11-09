@@ -122,6 +122,11 @@ class Maze:
     def count_empty(self) -> int:
         return sum(1 for row in self.grid for c in row if c == EMPTY)
 
+    def shortest_path(self) -> list[tuple[int, int]]:
+        """起点→终点的最短路径（4 连通 BFS，只走可通行格）。"""
+        return _shortest_path(self.grid, self.width, self.height,
+                              self.start, self.end)
+
 
 class _DSU:
     """并查集（节点连通性校验用）。"""

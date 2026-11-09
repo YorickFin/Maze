@@ -26,6 +26,8 @@ class Api:
         self.cfg = cfg
         self.speed = 50  # 1-100
         self.strategy = self._strategy_name(cfg)
+        # 最短路径是地图级信息，仅换图时重算，供前端在完整地图上标注
+        self.shortest_path = maze.shortest_path()
 
     @staticmethod
     def _strategy_name(cfg: Config) -> str:
@@ -65,6 +67,11 @@ class Api:
         self.cfg.allow_diagonal = allow
         self.solver.set_move_mode(allow)
 
+    def reset(self) -> None:
+        """不换地图，重建求解器：回到起点，清空已探索与实时视野。"""
+        self.solver = Solver.from_config(self.maze, self.cfg)
+        self.solver.set_strategy(*self._strategy_flags(self.strategy))
+
     def restart(self) -> str:
         """换随机种子重新生成迷宫，并重建求解器。"""
         self.cfg.seed = random.randrange(1, 2**31)
@@ -73,16 +80,18 @@ class Api:
         solver.set_strategy(*self._strategy_flags(self.strategy))
         self.maze = maze
         self.solver = solver
+        self.shortest_path = maze.shortest_path()
         return json.dumps({"seed": self.cfg.seed})
 
     def get_map(self) -> str:
-        """全图只在启动/重开时返回一次，之后由前端缓存。"""
+        """全图只在启动/换图时返回一次，之后由前端缓存。"""
         return json.dumps({
             "width": self.maze.width,
             "height": self.maze.height,
             "grid": self.maze.grid,
             "start": list(self.maze.start),
             "end": list(self.maze.end),
+            "path": [list(c) for c in self.shortest_path],
             "view_size": self.cfg.view_size,
         }, separators=(",", ":"))
 

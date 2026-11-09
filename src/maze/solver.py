@@ -5,6 +5,9 @@
 - 红点是可见标记：进入视野后记录其位置，随后直接规划过去。
 - 默认「沿墙模式」：右手法则，尝试顺序 右 → 直 → 左 → 后（无墙优先），
   只用已知地图判断相邻格；已知墙/障碍直接跳过，未知格尝试，撞到灰斑即标记。
+  八向时按 90°右 → 45°右 → 直 → … 顺时针扫描，只接受「移动后右侧半平面仍有墙」
+  的候选以保持贴墙；无贴墙候选时按 直行 → 斜前 兜底。八向对角允许擦单侧墙角，
+  但禁止穿过两道墙的对角缝隙；四向不允许对角。
   每次成功后记录 (位置, 朝向)，状态重复（打转）或四向都不可行时切到规划模式。
 - 「规划模式」兜底：方向代价 Dijkstra（右 1、上/下 3、左 10）走向
   「与未观测区域相邻的前沿」；路径可复用已探明区域回溯，没有四邻盲扫。
@@ -36,9 +39,12 @@ ENTRY_DIRS = ((1, 0), (0, 1), (0, -1), (-1, 0),
 WALL_DIRS4 = ((1, 0), (0, 1), (-1, 0), (0, -1))
 WALL_TURNS4 = (1, 0, 3, 2)
 
-# 八向沿墙转向顺序：+1(45°右) → +2(90°右) → 0 → -1(45°左)
-# → -2(90°左) → +3(135°右) → -3(135°左) → +4(掉头)
-WALL_TURNS8 = (1, 2, 0, 7, 6, 3, 5, 4)
+# 八向沿墙转向顺序：顺时针从 +2(90°右) 扫到 -3(135°左)，最后掉头
+# 90° 右优先保证贴墙，45° 右只在直角右转被挡时使用，避免擦着墙脱离绕圈
+WALL_TURNS8 = (2, 1, 0, 7, 6, 5, 3, 4)
+
+# 八向沿墙兜底顺序：附近无贴墙选项时，直行 → 斜前 → 直角 → 掉头
+WALL_DRIFT8 = (0, 1, 7, 2, 6, 5, 3, 4)
 
 MODE_WALL = "沿墙"
 MODE_PLAN = "规划"
@@ -289,8 +295,12 @@ class Solver:
                     self.reach.add(nb)
                     stack.append(nb)
 
-    def _try_move(self, nx: int, ny: int) -> bool:
-        """尝试移动一格（允许对角，但禁止切角）。受阻时标记并返回 False。"""
+    def _try_move(self, nx: int, ny: int, allow_brush: bool = False) -> bool:
+        """尝试移动一格（允许对角，默认禁止切角）。受阻时标记并返回 False。
+
+        allow_brush=True 时跳过切角检查，用于沿墙模式下斜向擦单侧墙角；
+        调用方需自行保证不会穿过「两侧都是墙」的对角缝隙。
+        """
         px, py = self.pos
         dx, dy = nx - px, ny - py
         if dx and dy and not self.allow_diagonal:
@@ -298,7 +308,7 @@ class Solver:
         if self.maze.is_blocked(nx, ny):
             self._mark_blocked(nx, ny)
             return False
-        if dx and dy:
+        if dx and dy and not allow_brush:
             # 禁止切角：两个相邻正交格都必须可通行
             for sx, sy in ((nx, py), (px, ny)):
                 if self.maze.is_blocked(sx, sy):
@@ -609,12 +619,21 @@ class Solver:
 
     # ---- 沿墙模式 ----
 
+    def _known_blocked(self, x: int, y: int) -> bool:
+        """已知不可通行（墙/障碍，越界也视为阻挡）。"""
+        if not self.maze.in_bounds(x, y):
+            return True
+        return self.known.get((x, y)) in (KNOWN_WALL, KNOWN_OBSTACLE)
+
     def _wall_step(self) -> bool:
         """右手法则走一步。返回 False 表示需要切到规划模式。
 
         已知墙/已知障碍直接跳过（不盲目尝试）；未知相邻格尝试，
         受阻即标记障碍并换下一个方向。成功后记录 (位置, 朝向) 用于打转检测。
+        八向走贴墙优先版本（_wall_step8），四向保持原规则。
         """
+        if self.allow_diagonal:
+            return self._wall_step8()
         pos = self.pos
         for k in range(self.wall_turn, len(self.wall_turns)):
             nd = (self.facing + self.wall_turns[k]) % len(self.wall_dirs)
@@ -649,6 +668,56 @@ class Solver:
                 self.wall_turn = k + 1
             return True
         self.wall_failed = True
+        return False
+
+    def _wall_step8(self) -> bool:
+        """八向右手法则：贴墙优先扫描，开阔处直行兜底。
+
+        两轮扫描：
+        1) 按顺时针顺序（90°右 → 45°右 → 直 → 45°左 → 90°左 …）取第一个
+           「移动后右侧半平面仍有墙」的候选，保证真的贴着墙走；
+        2) 附近无墙可贴时按 直行 → 斜前 → 直角 → 掉头 取第一个可行候选，
+           避免在腔室里原地绕圈（原 45° 优先规则打转的根因）。
+        对角允许擦单侧墙角，但两侧都是墙的对角缝隙禁止穿过。
+        """
+        pos = self.pos
+        n = len(self.wall_dirs)
+        for contact_only, seq in ((True, self.wall_turns),
+                                  (False, WALL_DRIFT8)):
+            for off in seq:
+                nd = (self.facing + off) % n
+                dx, dy = self.wall_dirs[nd]
+                nx, ny = pos[0] + dx, pos[1] + dy
+                if self._known_blocked(nx, ny):
+                    continue
+                if dx and dy:
+                    sides = sum(1 for c in ((nx, pos[1]), (pos[0], ny))
+                                if self._known_blocked(*c))
+                    if sides > 1:
+                        continue  # 禁止穿两道墙的对角缝隙
+                if contact_only and not self._keeps_wall_on_right(nx, ny, nd):
+                    continue
+                if self._try_move(nx, ny, allow_brush=bool(dx and dy)):
+                    self.facing = nd
+                    self.wall_turn = 0
+                    st = (self.pos, self.facing)
+                    if st in self.wall_states:
+                        self.wall_failed = True   # 打转 → 交给规划模式
+                        self.mode = MODE_PLAN
+                    else:
+                        self.wall_states.add(st)
+                    return True
+        self.wall_failed = True
+        return False
+
+    def _keeps_wall_on_right(self, x: int, y: int, nd: int) -> bool:
+        """移动后右侧半平面（45° / 90° / 135°右）是否仍有墙可贴。"""
+        n = len(self.wall_dirs)
+        for k in (1, 2, 3):
+            d = (nd + k) % n
+            dx, dy = self.wall_dirs[d]
+            if self._known_blocked(x + dx, y + dy):
+                return True
         return False
 
     # ---- 主步进 ----
