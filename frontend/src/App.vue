@@ -450,6 +450,7 @@ onUnmounted(() => {
 
       <div class="controls">
         <button class="primary" :disabled="reloading" @click="start">开始</button>
+        <button class="ghost" :disabled="reloading" @click="newMap">换图</button>
         <button class="ghost" :disabled="!started" @click="togglePause">{{ paused ? '继续' : '暂停' }}</button>
         <label class="field">
           <span>策略</span>
@@ -474,7 +475,6 @@ onUnmounted(() => {
           <span>视野 {{ viewSize }}</span>
           <input v-model.number="viewSize" type="range" min="10" max="100" @input="onViewSize" />
         </label>
-        <button class="ghost" :disabled="reloading" @click="newMap">换图</button>
       </div>
 
       <div class="status">
